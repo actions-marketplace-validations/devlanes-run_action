@@ -138,9 +138,11 @@ outputs:
   lane:
     description: The lane reference, such as `acme@0`. Set by `start`, `with` and `stop`.
   lane-index:
-    description: The lane number. Set by `command: start`.
+    description: >-
+      The lane number. Set by `command: start`.
   domain:
-    description: The lane's domain, such as `acme.localhost`. Set by `command: start`.
+    description: >-
+      The lane's domain, such as `acme.localhost`. Set by `command: start`.
   https-port:
     description: >-
       The port the HTTPS proxy listens on, 443 or a fallback such as 8443. Set by
@@ -159,7 +161,8 @@ outputs:
       container port (Compose) or port name (plain containers) to the host port. Set by
       `command: start`.
   env:
-    description: JSON object of the lane's environment variables. Set by `command: start`.
+    description: >-
+      JSON object of the lane's environment variables. Set by `command: start`.
   ca-cert:
     description: Path of the devlanes CA certificate. Set by every command but `stop`.
   ca-bundle:
