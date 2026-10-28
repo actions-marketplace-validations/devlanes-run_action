@@ -1,0 +1,46 @@
+{
+  "name": "@devlanes/action",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GitHub Action that installs devlanes, starts a lane and stops it with its logs at job end",
+  "homepage": "https://devlanes.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devlanes-run/action.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "rslib build",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "lint-ci": "biome ci .",
+    "lint-fix": "biome check --write --unsafe .",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "test-types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@actions/artifact": "^6.3.1",
+    "@actions/core": "^3.0.1",
+    "@actions/tool-cache": "^4.0.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@arthurfiorette/biomejs-config": "^2.0.1",
+    "@biomejs/biome": "^2.6.3",
+    "@rslib/core": "^1.0.4",
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  },
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=24.16"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "onFail": "error",
+      "version": ">=24.16"
+    }
+  }
+}

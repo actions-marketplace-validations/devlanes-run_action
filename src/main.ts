@@ -1,0 +1,264 @@
+// The action's main step: install devlanes, prepare the runner once per job, then start a lane,
+// run a command against it, or stop it.
+
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import * as core from '@actions/core';
+import { caFiles, caVariables } from './ca.ts';
+import { cli, type Devlanes } from './devlanes.ts';
+import { childEnv } from './env.ts';
+import { type Inputs, readInputs } from './inputs.ts';
+import { install } from './install.ts';
+import { defaultArtifactName, shouldUpload, uploadLogs, writeDiagnostics } from './logs.ts';
+import {
+  failedUnits,
+  type HostsPage,
+  httpsPort,
+  infraOutputs,
+  type LaneEnv,
+  type LaneSummary,
+  type StatusPage,
+  serviceOutputs,
+  urlOutputs
+} from './outputs.ts';
+import {
+  allowLowPorts,
+  applyConfig,
+  ciConfig,
+  daemonStatus,
+  flattenConfig,
+  trustLinux,
+  trustSkippedWarning
+} from './setup.ts';
+import { writeScript } from './shell.ts';
+import { readyVariable, type State, saveState, stoppedVariable } from './state.ts';
+
+/** Runs the main step. */
+async function main(): Promise<void> {
+  const inputs = readInputs((name) => core.getInput(name), process.platform);
+  const installed = await core.group(`Install devlanes ${inputs.version}`, () =>
+    install(inputs.version)
+  );
+
+  // Later `run: devlanes ...` steps must reach the same daemon, which is keyed by the home.
+  if (inputs.home) core.exportVariable('DEVLANES_HOME', inputs.home);
+  const cwd = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), inputs.workingDirectory);
+  const logsDir = join(process.env.RUNNER_TEMP ?? tmpdir(), 'devlanes-logs');
+  const devlanes = () => cli(installed.bin, childEnv(process.env, inputs.home));
+
+  const printed = (await devlanes().run(['--version'])).stdout.trim();
+  core.setOutput('version', printed.replace(/^devlanes\s+/, '') || installed.version);
+  core.setOutput('logs-dir', logsDir);
+
+  if (inputs.command === 'stop') {
+    await stop(devlanes(), inputs, cwd, logsDir);
+    return;
+  }
+
+  const daemonStarted = await prepare(devlanes(), inputs);
+  const status = await daemonStatus(devlanes());
+  const home = status.home ?? (inputs.home || join(homedir(), '.devlanes'));
+  const state: State = {
+    bin: installed.bin,
+    home,
+    cwd,
+    logsDir,
+    lane: '',
+    daemonStarted,
+    failed: false
+  };
+  saveState(state);
+  core.setOutput('home', home);
+
+  const ca = caFiles(home);
+  core.setOutput('ca-cert', ca.cert);
+  core.setOutput('ca-bundle', ca.bundle);
+  if (inputs.exportCa) {
+    const dir = join(process.env.RUNNER_TEMP ?? tmpdir(), 'devlanes-ca');
+    for (const [name, value] of Object.entries(await caVariables(ca, process.env, dir))) {
+      core.exportVariable(name, value);
+    }
+  }
+
+  if (inputs.command === 'start') await start(devlanes(), inputs, state);
+  else if (inputs.command === 'with') await withCommand(devlanes(), inputs, state);
+}
+
+/**
+ * Configures the runner and starts the daemon, once per job. Returns whether this step started
+ * the daemon, which makes its post step the one that stops it.
+ */
+async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
+  const before = await daemonStatus(devlanes);
+  if (process.env[readyVariable] && before.running) return false;
+  if (before.running) {
+    core.warning(
+      'A devlanes daemon was already running; config, low-ports and trust apply after `devlanes daemon restart`'
+    );
+  }
+
+  await core.group('Set up devlanes', async () => {
+    await applyConfig(
+      devlanes,
+      ciConfig.map(([key, value]) => ({ key, value }))
+    );
+    await applyConfig(devlanes, flattenConfig(inputs.config));
+
+    if (process.platform === 'linux') {
+      if (inputs.lowPorts) await allowLowPorts();
+      if (inputs.trust || inputs.hostsFile) await trustLinux(devlanes, inputs.hostsFile);
+    } else if (inputs.trust) {
+      core.warning(trustSkippedWarning(process.platform));
+    }
+  });
+
+  await core.group('devlanes doctor', async () => {
+    await devlanes.run(['doctor'], { stream: true });
+  });
+
+  let started = false;
+  if (!before.running) {
+    const result = await devlanes.run(['daemon', 'start'], { stream: true });
+    if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
+    started = true;
+  }
+  core.exportVariable(readyVariable, '1');
+  return started;
+}
+
+/** `--timeout` and `--profile` flags from the inputs. */
+function startFlags(inputs: Inputs): string[] {
+  return [
+    ...(inputs.timeout ? ['--timeout', inputs.timeout] : []),
+    ...inputs.profiles.flatMap((profile) => ['--profile', profile])
+  ];
+}
+
+/** The lane of the working directory, or null when devlanes cannot name it. */
+async function currentLane(devlanes: Devlanes, cwd: string): Promise<LaneEnv | null> {
+  try {
+    return await devlanes.json<LaneEnv>(['env', 'show'], { cwd });
+  } catch (error) {
+    core.warning(`Could not read the lane: ${message(error)}`);
+    return null;
+  }
+}
+
+/** The status of one lane, or undefined when devlanes cannot report it. */
+async function laneStatus(
+  devlanes: Devlanes,
+  lane: string,
+  cwd: string
+): Promise<LaneSummary | undefined> {
+  try {
+    const page = await devlanes.json<StatusPage>(['status', lane], { cwd });
+    return page.items.find((item) => item.reference === lane) ?? page.items[0];
+  } catch (error) {
+    core.warning(`Could not read the lane's status: ${message(error)}`);
+    return undefined;
+  }
+}
+
+/** `command: start`: start the lane, then publish its URLs, ports and environment. */
+async function start(devlanes: Devlanes, inputs: Inputs, state: State): Promise<void> {
+  const result = await devlanes.run(['start', '--no-ui', ...startFlags(inputs), ...inputs.units], {
+    cwd: state.cwd,
+    stream: true
+  });
+
+  const laneEnv = await currentLane(devlanes, state.cwd);
+  if (laneEnv) {
+    state.lane = laneEnv.lane;
+    saveState(state);
+    core.setOutput('lane', laneEnv.lane);
+    core.setOutput('env', JSON.stringify(laneEnv.env));
+    if (inputs.exportEnv) {
+      for (const [name, value] of Object.entries(laneEnv.env)) core.exportVariable(name, value);
+    }
+
+    const lane = await laneStatus(devlanes, laneEnv.lane, state.cwd);
+    if (lane) {
+      const services = serviceOutputs(lane);
+      core.setOutput('lane-index', lane.index === null ? '' : String(lane.index));
+      core.setOutput('domain', lane.domain ?? '');
+      core.setOutput('services', JSON.stringify(services));
+      core.setOutput('urls', JSON.stringify(urlOutputs(services)));
+      core.setOutput('infra', JSON.stringify(infraOutputs(lane)));
+    }
+    try {
+      const port = httpsPort(await devlanes.json<HostsPage>(['url', 'ls'], { cwd: state.cwd }));
+      core.setOutput('https-port', port === null ? '' : String(port));
+    } catch (error) {
+      core.warning(`Could not read the proxy's port: ${message(error)}`);
+    }
+  }
+
+  if (result.code !== 0) {
+    state.failed = true;
+    saveState(state);
+    core.setFailed(`devlanes start exited ${result.code}`);
+  }
+}
+
+/** `command: with`: start the lane, run the script against it and stop what was started. */
+async function withCommand(devlanes: Devlanes, inputs: Inputs, state: State): Promise<void> {
+  const argv = await writeScript(
+    inputs.shell,
+    inputs.run,
+    process.env.RUNNER_TEMP ?? tmpdir(),
+    process.platform
+  );
+  const result = await devlanes.run(
+    ['with', ...startFlags(inputs), '--logs-dir', state.logsDir, ...inputs.units, '--', ...argv],
+    { cwd: state.cwd, stream: true }
+  );
+  core.setOutput('exit-code', String(result.code));
+
+  const laneEnv = await currentLane(devlanes, state.cwd);
+  if (laneEnv) {
+    state.lane = laneEnv.lane;
+    core.setOutput('lane', laneEnv.lane);
+  }
+  if (result.code !== 0) {
+    state.failed = true;
+    core.setFailed(`devlanes with exited ${result.code}`);
+  }
+  saveState(state);
+}
+
+/** `command: stop`: stop the lane now, write its logs and upload them. */
+async function stop(
+  devlanes: Devlanes,
+  inputs: Inputs,
+  cwd: string,
+  logsDir: string
+): Promise<void> {
+  const laneEnv = await currentLane(devlanes, cwd);
+  if (!laneEnv) throw new Error(`No devlanes lane in ${cwd} to stop`);
+  core.setOutput('lane', laneEnv.lane);
+
+  const lane = await laneStatus(devlanes, laneEnv.lane, cwd);
+  const result = await devlanes.run(['stop', '--lane', laneEnv.lane, '--logs-dir', logsDir], {
+    cwd,
+    stream: true
+  });
+  const failed = result.code !== 0 || failedUnits(lane).length > 0;
+
+  if (shouldUpload(inputs.uploadLogs, failed)) {
+    await writeDiagnostics(devlanes, logsDir, lane);
+    await uploadLogs(
+      logsDir,
+      inputs.artifactName || defaultArtifactName(process.env),
+      inputs.retentionDays
+    );
+  }
+  core.exportVariable(stoppedVariable, '1');
+  if (result.code !== 0) core.setFailed(`devlanes stop exited ${result.code}`);
+}
+
+/** The text of an error. */
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+main().catch((error: unknown) => core.setFailed(message(error)));

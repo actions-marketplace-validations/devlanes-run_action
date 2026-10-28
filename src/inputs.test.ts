@@ -1,0 +1,83 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { list, readInputs, version } from './inputs.ts';
+
+/** An input reader over a fixed map, empty for anything missing, as the runner does. */
+function reader(values: Record<string, string>) {
+  return (name: string) => values[name] ?? '';
+}
+
+test('defaults match action.yml when every input is empty', () => {
+  const inputs = readInputs(reader({}), 'linux');
+  assert.equal(inputs.version, 'latest');
+  assert.equal(inputs.command, 'start');
+  assert.equal(inputs.shell, 'bash');
+  assert.equal(inputs.workingDirectory, '.');
+  assert.equal(inputs.trust, true);
+  assert.equal(inputs.hostsFile, false);
+  assert.equal(inputs.lowPorts, true);
+  assert.equal(inputs.exportEnv, true);
+  assert.equal(inputs.exportCa, true);
+  assert.equal(inputs.uploadLogs, 'on-failure');
+  assert.equal(inputs.cleanup, 'stop');
+  assert.equal(inputs.retentionDays, undefined);
+  assert.deepEqual(inputs.profiles, []);
+  assert.deepEqual(inputs.units, []);
+});
+
+test('the default shell follows the runner like run steps', () => {
+  assert.equal(readInputs(reader({}), 'win32').shell, 'pwsh');
+  assert.equal(readInputs(reader({}), 'darwin').shell, 'bash');
+});
+
+test('with needs a run script', () => {
+  assert.throws(() => readInputs(reader({ command: 'with' }), 'linux'), /"run" is required/);
+  const inputs = readInputs(reader({ command: 'with', run: 'pnpm test' }), 'linux');
+  assert.equal(inputs.run, 'pnpm test');
+});
+
+test('lists split on their separators and drop blanks', () => {
+  const inputs = readInputs(
+    reader({ profile: 'e2e, ci\nextra', units: ' api  web\n+worker ' }),
+    'linux'
+  );
+  assert.deepEqual(inputs.profiles, ['e2e', 'ci', 'extra']);
+  assert.deepEqual(inputs.units, ['api', 'web', '+worker']);
+  assert.deepEqual(list(' , ,', /,/), []);
+});
+
+test('choices and booleans are case-insensitive and reject anything else', () => {
+  const inputs = readInputs(
+    reader({ command: 'STOP', trust: 'False', 'upload-logs': 'Always' }),
+    'linux'
+  );
+  assert.equal(inputs.command, 'stop');
+  assert.equal(inputs.trust, false);
+  assert.equal(inputs.uploadLogs, 'always');
+  assert.throws(
+    () => readInputs(reader({ command: 'restart' }), 'linux'),
+    /"command" must be one of/
+  );
+  assert.throws(
+    () => readInputs(reader({ trust: 'yes' }), 'linux'),
+    /"trust" must be true or false/
+  );
+});
+
+test('retention-days takes whole days from 1 to 90', () => {
+  assert.equal(readInputs(reader({ 'retention-days': '7' }), 'linux').retentionDays, 7);
+  for (const value of ['0', '91', '1.5', 'week']) {
+    assert.throws(() => readInputs(reader({ 'retention-days': value }), 'linux'), /retention-days/);
+  }
+});
+
+test('versions accept latest, next and exact releases with or without v', () => {
+  assert.equal(version(''), 'latest');
+  assert.equal(version('Latest'), 'latest');
+  assert.equal(version('next'), 'next');
+  assert.equal(version('0.6.1'), '0.6.1');
+  assert.equal(version('v0.6.1'), '0.6.1');
+  assert.equal(version('1.0.0-rc.1'), '1.0.0-rc.1');
+  assert.throws(() => version('0.6'), /must be latest, next or a version/);
+  assert.throws(() => version('^0.6.0'), /must be latest, next or a version/);
+});

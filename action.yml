@@ -1,0 +1,121 @@
+name: devlanes
+description: Install devlanes, start a project's services, containers and tasks, and stop them with their logs at the end of the job.
+author: devlanes
+branding:
+  icon: layers
+  color: yellow
+
+inputs:
+  version:
+    description: devlanes version to install, as latest, next or 0.6.1. The default is the version this release of the action was tested with.
+    required: false
+    default: "0.6.1"
+  command:
+    description: What to do after installing. start brings up the lane and leaves it running for later steps; with runs `run` against the lane and stops it; stop stops the lane now and uploads its logs; install only installs and prepares devlanes.
+    required: false
+    default: start
+  run:
+    description: Script to run against the lane when command is with. It gets the lane's environment, such as DEVLANES_PUBLIC_URL_<SERVICE>.
+    required: false
+    default: ""
+  shell:
+    description: Shell for `run`, as bash, sh, pwsh, powershell or cmd. Defaults to bash on Linux and macOS and pwsh on Windows, like run steps.
+    required: false
+    default: ""
+  profile:
+    description: Profiles from devlanes.yaml to start, separated by commas or newlines.
+    required: false
+    default: ""
+  units:
+    description: Units to start, separated by spaces or newlines, such as `api web` or `+api`. Defaults to the lane's default profile.
+    required: false
+    default: ""
+  timeout:
+    description: How long to wait for every unit to be ready, such as 5m. devlanes waits 180s by default.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory that contains devlanes.yaml, relative to the workspace.
+    required: false
+    default: "."
+  home:
+    description: DEVLANES_HOME for this job. Empty keeps devlanes' default, ~/.devlanes. Exported, so later devlanes commands reach the same daemon.
+    required: false
+    default: ""
+  config:
+    description: >-
+      YAML merged into the user config.yaml before the daemon starts, such as
+      `proxy: { https_port: 9443 }`.
+    required: false
+    default: ""
+  trust:
+    description: On Linux, trust the devlanes CA in the system store and in the NSS store that Chromium and Playwright read. macOS and Windows runners cannot, and get a warning.
+    required: false
+    default: "true"
+  hosts-file:
+    description: On Linux, install the /etc/hosts helper for programs that cannot resolve *.localhost, such as Wrangler's workerd.
+    required: false
+    default: "false"
+  low-ports:
+    description: On Linux, let the proxy listen on 443 and 80, so public URLs carry no port.
+    required: false
+    default: "true"
+  export-env:
+    description: With command start, write the lane's variables (DEVLANES_PUBLIC_URL_<SERVICE> and the other DEVLANES_ ones) to the environment of later steps.
+    required: false
+    default: "true"
+  export-ca:
+    description: Set NODE_EXTRA_CA_CERTS, DENO_CERT, SSL_CERT_FILE and REQUESTS_CA_BUNDLE for later steps and the with command, so they trust the devlanes CA on every OS.
+    required: false
+    default: "true"
+  upload-logs:
+    description: When to upload the logs as an artifact, as on-failure, always or never. on-failure means this action's step failed or a unit had failed by the end of the job.
+    required: false
+    default: on-failure
+  artifact-name:
+    description: Name of the logs artifact. Defaults to devlanes-logs-<job id>, with -2, -3 and so on added when another job of the run took the name.
+    required: false
+    default: ""
+  retention-days:
+    description: Days to keep the logs artifact. Empty keeps the repository's setting.
+    required: false
+    default: ""
+  cleanup:
+    description: What the end of the job does, as stop (the lane and the daemon this step started), clean (also lane clean and infra down, for self-hosted runners) or keep.
+    required: false
+    default: stop
+
+outputs:
+  version:
+    description: The installed devlanes version.
+  home:
+    description: The devlanes home in use.
+  lane:
+    description: The lane reference, such as acme@0.
+  lane-index:
+    description: The lane number.
+  domain:
+    description: The lane's domain, such as acme.localhost.
+  https-port:
+    description: The port the HTTPS proxy listens on, 443 or a fallback such as 8443.
+  urls:
+    description: JSON object of each service's URL, through the proxy when it has hostnames. Read one with fromJSON(steps.<id>.outputs.urls).api.
+  services:
+    description: JSON object of each service's state, port, ports, url, public_url and urls.
+  infra:
+    description: JSON object of each container's state, ports and urls.
+  env:
+    description: JSON object of the lane's environment variables.
+  ca-cert:
+    description: Path of the devlanes CA certificate.
+  ca-bundle:
+    description: Path of the bundle with the system roots and the devlanes CA.
+  logs-dir:
+    description: Directory with one log file per unit, written when the lane stops.
+  exit-code:
+    description: Exit code of the with command.
+
+runs:
+  using: node24
+  main: dist/main.js
+  post: dist/post.js
