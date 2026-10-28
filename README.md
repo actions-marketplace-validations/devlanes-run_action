@@ -46,7 +46,7 @@ While the lane starts, the log shows devlanes' own output: a collapsible group p
 | `export-env` | `true` | With `command: start`, give later steps the lane's variables: `DEVLANES_PUBLIC_URL_<SERVICE>`, `DEVLANES_PROJECT`, `DEVLANES_LANE` and the rest. |
 | `export-ca` | `true` | Set `NODE_EXTRA_CA_CERTS`, `DENO_CERT`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` for later steps and the `with` script. |
 | `upload-logs` | `on-failure` | When the logs are uploaded as an artifact: `on-failure`, `always` (or `true`) or `never` (or `false`). See [Logs](#logs). |
-| `artifact-name` | `devlanes-logs-<job id>` | Name of the logs artifact. Jobs of a matrix share a job id, so later ones get `-2`, `-3` and so on. |
+| `artifact-name` | `devlanes-logs-<job name>-<lane>` | Name of the logs artifact. The default, such as `devlanes-logs-e2e-ubuntu-latest-acme-0`, differs between the jobs of a matrix and between projects in one job. |
 | `retention-days` | repository setting | Days to keep the logs artifact. |
 | `cleanup` | `stop` | What the end of the job does: `stop` stops the lane and the daemon this step started; `clean` also runs `devlanes lane clean` and `devlanes infra down`, for self-hosted runners; `keep` leaves everything running and uploads no logs. |
 | `token` | `github.token` | Token for reading the job's steps from the GitHub API, which `upload-logs: on-failure` uses. Rarely needs changing. |
@@ -149,7 +149,7 @@ devlanes keeps this environment in the daemon's memory and never writes it to di
 - run: pnpm test:e2e
 ```
 
-When `pnpm test:e2e` fails, the end of the job stops the lane and uploads its logs as `devlanes-logs-<job id>`. The artifact holds `unit-<name>.log` for each unit, the daemon's log, the output of `devlanes doctor`, the lane's status and each container's log. A failed, cancelled or timed-out step counts as a failure.
+When `pnpm test:e2e` fails, the end of the job stops the lane and uploads its logs as an artifact named after the job and the lane, such as `devlanes-logs-e2e-acme-0`. The artifact holds `unit-<name>.log` for each unit, the daemon's log, the output of `devlanes doctor`, the lane's status and each container's log. A failed, cancelled or timed-out step counts as a failure.
 
 An action cannot read the job's status, so the post step asks the GitHub API which steps of the job failed, using the `token` input, which defaults to the job's `GITHUB_TOKEN`. In a private repository that token needs `actions: read`:
 
@@ -198,11 +198,10 @@ steps:
   - uses: devlanes-run/action@v1
     with:
       profile: e2e
-      artifact-name: devlanes-logs-shard-${{ matrix.shard }}
   - run: pnpm exec playwright test --shard=${{ matrix.shard }}/4
 ```
 
-Each shard runs its own lane on its own runner.
+Each shard runs its own lane on its own runner, and its logs artifact carries the job's name, such as `devlanes-logs-e2e-1-acme-0`.
 
 ### A project in a subfolder
 
@@ -224,11 +223,9 @@ devlanes gives a checkout one lane, and a folder below it shares that lane, so a
 - uses: devlanes-run/action@v1
   with:
     working-directory: storefront/apps/storefront
-    artifact-name: devlanes-logs-storefront
 - uses: devlanes-run/action@v1
   with:
     working-directory: admin/apps/admin
-    artifact-name: devlanes-logs-admin
 ```
 
 Each use then has its own lane, logs folder and artifact, and the first one prepares the runner and starts the daemon both share.

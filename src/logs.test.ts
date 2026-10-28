@@ -3,14 +3,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import {
-  artifactNames,
-  defaultArtifactName,
-  filesUnder,
-  isNameTaken,
-  laneLogsDir,
-  shouldUpload
-} from './logs.ts';
+import { defaultArtifactName, filesUnder, laneLogsDir, shouldUpload } from './logs.ts';
 
 test('each lane gets its own logs folder under the runner temp', () => {
   assert.equal(
@@ -27,23 +20,20 @@ test('upload modes', () => {
   assert.equal(shouldUpload('never', true), false);
 });
 
-test('artifact names start from the job id and take a free suffix', () => {
-  assert.equal(defaultArtifactName({ GITHUB_JOB: 'e2e' }), 'devlanes-logs-e2e');
-  assert.equal(defaultArtifactName({}), 'devlanes-logs-job');
-  assert.deepEqual(artifactNames('logs').slice(0, 3), ['logs', 'logs-2', 'logs-3']);
-  assert.equal(artifactNames('logs').at(-1), 'logs-9');
-});
-
-test('a taken name is told apart from other upload errors', () => {
+test('default artifact names tell matrix jobs and lanes apart', () => {
   assert.equal(
-    isNameTaken(
-      new Error(
-        'Received non-retryable error: Failed request: (409) Conflict: an artifact with this name already exists on the workflow run'
-      )
-    ),
-    true
+    defaultArtifactName({ GITHUB_JOB: 'e2e' }, 'start on macos-latest', 'acme@0'),
+    'devlanes-logs-start-on-macos-latest-acme-0'
   );
-  assert.equal(isNameTaken(new Error('Failed request: (500) Internal Server Error')), false);
+  assert.equal(
+    defaultArtifactName({ GITHUB_JOB: 'e2e' }, 'E2E (ubuntu-latest, 2/4)', ''),
+    'devlanes-logs-e2e-ubuntu-latest-2-4'
+  );
+  assert.equal(
+    defaultArtifactName({ GITHUB_JOB: 'e2e' }, null, 'acme@0'),
+    'devlanes-logs-e2e-acme-0'
+  );
+  assert.equal(defaultArtifactName({}, null, ''), 'devlanes-logs-job');
 });
 
 test('files under a directory include nested ones, and a missing directory has none', async () => {

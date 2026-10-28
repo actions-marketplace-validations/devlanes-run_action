@@ -25,23 +25,27 @@ export function shouldUpload(mode: UploadMode, failed: boolean): boolean {
   return mode === 'always' || (mode === 'on-failure' && failed);
 }
 
-/** The artifact name when `artifact-name` is empty. */
-export function defaultArtifactName(env: NodeJS.ProcessEnv): string {
-  return `devlanes-logs-${env.GITHUB_JOB || 'job'}`;
+/** `text` with every run of characters an artifact name should not hold turned into one `-`. */
+function slug(text: string): string {
+  return text
+    .replace(/[^A-Za-z0-9._]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
 }
 
 /**
- * Names to try in order. Jobs of a matrix share their job id, and an artifact name can be used
- * once per run, so later jobs take the next free suffix.
+ * The artifact name when `artifact-name` is empty: the job's display name, which differs
+ * between the jobs of a matrix, and the lane, which differs between projects in one job. The
+ * artifact service accepts the same name from several jobs and keeps only one of them, so a
+ * name shared by two jobs would lose logs.
  */
-export function artifactNames(base: string): string[] {
-  return [base, ...Array.from({ length: 8 }, (_, index) => `${base}-${index + 2}`)];
-}
-
-/** Whether an upload failed because the run already has an artifact with that name. */
-export function isNameTaken(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\(409\)|conflict|already exists/i.test(message);
+export function defaultArtifactName(
+  env: NodeJS.ProcessEnv,
+  jobName: string | null,
+  lane: string
+): string {
+  const job = slug(jobName || env.GITHUB_JOB || 'job');
+  return lane ? `devlanes-logs-${job}-${slug(lane)}` : `devlanes-logs-${job}`;
 }
 
 /** Every file under `dir`. */
@@ -80,32 +84,18 @@ export async function writeDiagnostics(
   }
 }
 
-/** Uploads `dir` as an artifact and returns the name it got, or null without files. */
+/** Uploads `dir` as the artifact `name`, doing nothing when it holds no files. */
 export async function uploadLogs(
   dir: string,
-  base: string,
+  name: string,
   retentionDays: number | undefined
-): Promise<string | null> {
+): Promise<void> {
   const files = filesUnder(dir);
   if (files.length === 0) {
     core.info(`No devlanes logs in ${dir} to upload`);
-    return null;
+    return;
   }
-
-  const client = new DefaultArtifactClient();
-  for (const name of artifactNames(base)) {
-    try {
-      await client.uploadArtifact(
-        name,
-        files,
-        dir,
-        retentionDays === undefined ? {} : { retentionDays }
-      );
-      core.info(`Uploaded ${files.length} log files as artifact ${name}`);
-      return name;
-    } catch (error) {
-      if (!isNameTaken(error)) throw error;
-    }
-  }
-  throw new Error(`Every artifact name from ${base} to ${base}-9 is taken; set artifact-name`);
+  const options = retentionDays === undefined ? {} : { retentionDays };
+  await new DefaultArtifactClient().uploadArtifact(name, files, dir, options);
+  core.info(`Uploaded ${files.length} log files as artifact ${name}`);
 }

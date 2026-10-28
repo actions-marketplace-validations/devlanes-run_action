@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { type Job, jobFailedSteps, stepReport } from './job.ts';
+import { type Job, jobFailedSteps, jobName, stepReport } from './job.ts';
 
 type Step = NonNullable<Job['steps']>[number];
 
@@ -145,6 +145,13 @@ test('a main step waits before its first request', async () => {
   });
   assert.deepEqual(result, []);
   assert.deepEqual(waits, [3_000]);
+});
+
+test("the job's display name comes from the running job on this runner", async () => {
+  const named = jobs(started, post).map((job, index) => ({ ...job, name: `job ${index}` }));
+  assert.equal(await jobName(env, 'token', api(named).fetcher), 'job 1');
+  assert.equal(await jobName(env, 'token', api(403).fetcher), null);
+  assert.equal(await jobName({}, 'token', api(named).fetcher), null);
 });
 
 test('a refused request or a missing variable says why the answer is unknown', async () => {

@@ -105,8 +105,8 @@ inputs:
     default: on-failure
   artifact-name:
     description: >-
-      Name of the logs artifact. Defaults to `devlanes-logs-<job id>`, with `-2`, `-3` and so on
-      added when another job of the run took the name.
+      Name of the logs artifact. Defaults to `devlanes-logs-<job name>-<lane>`, such as
+      `devlanes-logs-e2e-ubuntu-latest-acme-0`, so matrix jobs and projects never share one.
     required: false
     default: ""
   retention-days:

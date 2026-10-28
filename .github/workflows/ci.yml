@@ -84,7 +84,7 @@ jobs:
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
           working-directory: test/fixtures/basic
-          # Every start job uploads under the same default name; the artifacts job counts them.
+          # The default name must differ per matrix job; the artifacts job counts them.
           upload-logs: always
           retention-days: 1
 
@@ -371,9 +371,11 @@ jobs:
             echo "::error::a passing job uploaded ${quiet[*]}"
             exit 1
           fi
-          # One artifact per start job of the e2e matrix, none from its passing with jobs.
-          e2e=(artifacts/devlanes-logs-e2e*)
-          if [ ${#e2e[@]} -ne 5 ]; then
-            echo "::error::expected 5 e2e artifacts, found ${#e2e[@]}: ${e2e[*]}"
+          # One artifact per start job of the e2e matrix, named after the job, and none from its
+          # passing with jobs.
+          start=(artifacts/devlanes-logs-start-on-*)
+          with=(artifacts/devlanes-logs-with-on-*)
+          if [ ${#start[@]} -ne 5 ] || [ ${#with[@]} -ne 0 ]; then
+            echo "::error::expected 5 start and 0 with artifacts: ${start[*]} ${with[*]}"
             exit 1
           fi

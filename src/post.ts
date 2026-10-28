@@ -7,7 +7,7 @@ import { cli, type Devlanes } from './devlanes.ts';
 import { childEnv } from './env.ts';
 import { hostsPath, removeHosts } from './hosts.ts';
 import { readInputs } from './inputs.ts';
-import { jobFailed } from './job.ts';
+import { jobFailed, jobName } from './job.ts';
 import {
   defaultArtifactName,
   laneLogsDir,
@@ -65,11 +65,10 @@ async function post(): Promise<void> {
     if (shouldUpload(inputs.uploadLogs, failed)) {
       await attempt('upload the devlanes logs', async () => {
         await writeDiagnostics(devlanes, state.logsDir, lane);
-        await uploadLogs(
-          state.logsDir,
-          inputs.artifactName || defaultArtifactName(process.env),
-          inputs.retentionDays
-        );
+        const name =
+          inputs.artifactName ||
+          defaultArtifactName(process.env, await jobName(process.env, inputs.token), reference);
+        await uploadLogs(state.logsDir, name, inputs.retentionDays);
       });
     }
   }

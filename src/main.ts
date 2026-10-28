@@ -10,7 +10,7 @@ import { childEnv } from './env.ts';
 import { addHosts, hostsPath, laneHostnames, resolvesToLoopback } from './hosts.ts';
 import { type Inputs, readInputs } from './inputs.ts';
 import { install } from './install.ts';
-import { jobFailed } from './job.ts';
+import { jobFailed, jobName } from './job.ts';
 import {
   defaultArtifactName,
   laneLogsDir,
@@ -322,11 +322,10 @@ async function stop(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<vo
   // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
   await writeDiagnostics(devlanes, logsDir, lane);
   if (shouldUpload(inputs.uploadLogs, failed)) {
-    await uploadLogs(
-      logsDir,
-      inputs.artifactName || defaultArtifactName(process.env),
-      inputs.retentionDays
-    );
+    const name =
+      inputs.artifactName ||
+      defaultArtifactName(process.env, await jobName(process.env, inputs.token), laneEnv.lane);
+    await uploadLogs(logsDir, name, inputs.retentionDays);
   }
   const stopped = [...stoppedLanes(process.env), laneEnv.lane];
   core.exportVariable(stoppedVariable, stopped.join('\n'));

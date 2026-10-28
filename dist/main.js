@@ -7,7 +7,7 @@ import "child_process";
 import { ok as external_assert_ok } from "assert";
 import { spawn } from "node:child_process";
 import { __webpack_require__ } from "./rslib-runtime.js";
-import { cli, getInput, shouldUpload, stoppedVariable, urlOutputs, mkdirP, io_cp, readInputs, resolvesToLoopback, serviceOutputs, rmRF, stoppedLanes, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, laneLogsDir, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, defaultArtifactName, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./q.js";
+import { cli, getInput, shouldUpload, stoppedVariable, urlOutputs, mkdirP, io_cp, job_jobName, readInputs, resolvesToLoopback, serviceOutputs, rmRF, stoppedLanes, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, laneLogsDir, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, defaultArtifactName, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./q.js";
 
 import { createRequire as __rspack_createRequire } from "node:module";
 const __rspack_createRequire_require = __rspack_createRequire(import.meta.url);
@@ -12551,7 +12551,8 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
     await writeDiagnostics(devlanes, logsDir, lane);
     if (shouldUpload(inputs.uploadLogs, failed)) {
-        await uploadLogs(logsDir, inputs.artifactName || defaultArtifactName(process.env), inputs.retentionDays);
+        const name = inputs.artifactName || defaultArtifactName(process.env, await job_jobName(process.env, inputs.token), laneEnv.lane);
+        await uploadLogs(logsDir, name, inputs.retentionDays);
     }
     const stopped = [
         ...stoppedLanes(process.env),

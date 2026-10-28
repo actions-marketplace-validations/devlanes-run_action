@@ -5,6 +5,7 @@ import * as core from '@actions/core';
 
 /** One job of `GET /repos/{repo}/actions/runs/{run}/attempts/{attempt}/jobs`. */
 export interface Job {
+  name?: string;
   status: string;
   runner_name: string | null;
   steps?: { name: string; status: string; conclusion: string | null }[];
@@ -127,6 +128,30 @@ export async function jobFailedSteps(
     if (report.settled || report.failed.length > 0) return report.failed;
   }
   return { reason };
+}
+
+/**
+ * The display name of this job, such as `e2e (ubuntu-latest, 2)`, which differs between the jobs
+ * of a matrix where the job id does not; null when the API cannot tell.
+ */
+export async function jobName(
+  env: NodeJS.ProcessEnv,
+  token: string,
+  fetcher: typeof fetch = fetch
+): Promise<string | null> {
+  const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
+  if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) return null;
+  try {
+    const jobs = await runJobs(env, token, fetcher);
+    if (!Array.isArray(jobs)) return null;
+    const job = jobs.find(
+      (entry) => entry.status === 'in_progress' && entry.runner_name === RUNNER_NAME
+    );
+    return job?.name ?? null;
+  } catch {
+    // A name is a nicety; the job id is the fallback.
+    return null;
+  }
 }
 
 /**

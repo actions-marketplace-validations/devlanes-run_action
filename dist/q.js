@@ -83117,6 +83117,22 @@ const hostsModes = [
     };
 }
 /**
+ * The display name of this job, such as `e2e (ubuntu-latest, 2)`, which differs between the jobs
+ * of a matrix where the job id does not; null when the API cannot tell.
+ */ async function job_jobName(env, token, fetcher = fetch) {
+    const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
+    if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) return null;
+    try {
+        const jobs = await runJobs(env, token, fetcher);
+        if (!Array.isArray(jobs)) return null;
+        const job = jobs.find((entry)=>entry.status === 'in_progress' && entry.runner_name === RUNNER_NAME);
+        return job?.name ?? null;
+    } catch  {
+        // A name is a nicety; the job id is the fallback.
+        return null;
+    }
+}
+/**
  * Whether a step of this job failed so far. When the API cannot tell, it answers yes, since
  * uploading logs nobody needed costs less than missing the logs of a failure.
  */ async function jobFailed(env, token, phase) {
@@ -144322,23 +144338,17 @@ const artifact_client = new DefaultArtifactClient();
 /** Whether logs are uploaded for this outcome. */ function shouldUpload(mode, failed) {
     return mode === 'always' || mode === 'on-failure' && failed;
 }
-/** The artifact name when `artifact-name` is empty. */ function defaultArtifactName(env) {
-    return `devlanes-logs-${env.GITHUB_JOB || 'job'}`;
+/** `text` with every run of characters an artifact name should not hold turned into one `-`. */ function slug(text) {
+    return text.replace(/[^A-Za-z0-9._]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
 }
 /**
- * Names to try in order. Jobs of a matrix share their job id, and an artifact name can be used
- * once per run, so later jobs take the next free suffix.
- */ function artifactNames(base) {
-    return [
-        base,
-        ...Array.from({
-            length: 8
-        }, (_, index)=>`${base}-${index + 2}`)
-    ];
-}
-/** Whether an upload failed because the run already has an artifact with that name. */ function isNameTaken(error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return /\(409\)|conflict|already exists/i.test(message);
+ * The artifact name when `artifact-name` is empty: the job's display name, which differs
+ * between the jobs of a matrix, and the lane, which differs between projects in one job. The
+ * artifact service accepts the same name from several jobs and keeps only one of them, so a
+ * name shared by two jobs would lose logs.
+ */ function defaultArtifactName(env, jobName, lane) {
+    const job = slug(jobName || env.GITHUB_JOB || 'job');
+    return lane ? `devlanes-logs-${job}-${slug(lane)}` : `devlanes-logs-${job}`;
 }
 /** Every file under `dir`. */ function filesUnder(dir) {
     try {
@@ -144386,25 +144396,17 @@ const artifact_client = new DefaultArtifactClient();
         }
     }
 }
-/** Uploads `dir` as an artifact and returns the name it got, or null without files. */ async function uploadLogs(dir, base, retentionDays) {
+/** Uploads `dir` as the artifact `name`, doing nothing when it holds no files. */ async function uploadLogs(dir, name, retentionDays) {
     const files = filesUnder(dir);
     if (files.length === 0) {
         core_info(`No devlanes logs in ${dir} to upload`);
-        return null;
+        return;
     }
-    const client = new DefaultArtifactClient();
-    for (const name of artifactNames(base)){
-        try {
-            await client.uploadArtifact(name, files, dir, retentionDays === undefined ? {} : {
-                retentionDays
-            });
-            core_info(`Uploaded ${files.length} log files as artifact ${name}`);
-            return name;
-        } catch (error) {
-            if (!isNameTaken(error)) throw error;
-        }
-    }
-    throw new Error(`Every artifact name from ${base} to ${base}-9 is taken; set artifact-name`);
+    const options = retentionDays === undefined ? {} : {
+        retentionDays
+    };
+    await new DefaultArtifactClient().uploadArtifact(name, files, dir, options);
+    core_info(`Uploaded ${files.length} log files as artifact ${name}`);
 }
 
 // Maps the JSON that devlanes prints into the action's outputs. Only the fields the outputs use
@@ -144483,4 +144485,4 @@ const state_key = 'devlanes';
     return (env[stoppedVariable] ?? '').split('\n').filter(Boolean);
 }
 
-export { addHosts, addPath, childEnv, cli, core_debug, core_group, core_info, core_warning, defaultArtifactName, exec_exec, exportVariable, failedUnits, getInput, hostsPath, httpsPort, infraOutputs, io_cp, isDebug, jobFailed, laneHostnames, laneLogsDir, lib_HttpClient, loadState, mkdirP, parseJson, readInputs, readyVariable, removeHosts, resolvesToLoopback, rmRF, serviceOutputs, setFailed, setOutput, shouldUpload, state_saveState, stoppedLanes, stoppedVariable, uploadLogs, urlOutputs, which, writeDiagnostics };
+export { addHosts, addPath, childEnv, cli, core_debug, core_group, core_info, core_warning, defaultArtifactName, exec_exec, exportVariable, failedUnits, getInput, hostsPath, httpsPort, infraOutputs, io_cp, isDebug, jobFailed, job_jobName, laneHostnames, laneLogsDir, lib_HttpClient, loadState, mkdirP, parseJson, readInputs, readyVariable, removeHosts, resolvesToLoopback, rmRF, serviceOutputs, setFailed, setOutput, shouldUpload, state_saveState, stoppedLanes, stoppedVariable, uploadLogs, urlOutputs, which, writeDiagnostics };
