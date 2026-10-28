@@ -244,7 +244,15 @@ A CI checkout is one lane. devlanes numbers lanes per project, and the domain ca
 
 The action sets `lanes.freeze_after: 0s` and `lanes.throttle_after: 0s`, so the lane is not frozen or slowed down while a long build runs between `start` and the tests, and `daemon.exit_when_idle: false`, so the daemon waits for the steps that use it. Pass `config` to change any of them.
 
-Services start through devlanes' adaptive start gate, as on a laptop: all at once while the runner has CPU and memory to spare, fewer at a time when it runs short. On a small runner that keeps a large project from swapping during the start. `config: { startup: { mode: all } }` turns the gate off.
+Services start through devlanes' adaptive start gate, as on a laptop: all at once while the runner has CPU and memory to spare, fewer at a time when it runs short. On a small runner that keeps a large project from swapping during the start. To turn the gate off:
+
+```yaml
+- uses: devlanes-run/action@v1
+  with:
+    config: |
+      startup:
+        mode: all
+```
 
 ## Troubleshooting
 
