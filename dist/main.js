@@ -12515,8 +12515,9 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     if (inputs.uploadLogs === 'on-failure' && !failed) {
         failed = await jobFailed(process.env, inputs.token);
     }
+    // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
+    await writeDiagnostics(devlanes, logsDir, lane);
     if (shouldUpload(inputs.uploadLogs, failed)) {
-        await writeDiagnostics(devlanes, logsDir, lane);
         await uploadLogs(logsDir, inputs.artifactName || defaultArtifactName(process.env), inputs.retentionDays);
     }
     exportVariable(stoppedVariable, '1');

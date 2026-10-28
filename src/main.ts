@@ -283,8 +283,9 @@ async function stop(
     failed = await jobFailed(process.env, inputs.token);
   }
 
+  // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
+  await writeDiagnostics(devlanes, logsDir, lane);
   if (shouldUpload(inputs.uploadLogs, failed)) {
-    await writeDiagnostics(devlanes, logsDir, lane);
     await uploadLogs(
       logsDir,
       inputs.artifactName || defaultArtifactName(process.env),

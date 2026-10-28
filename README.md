@@ -49,7 +49,6 @@ While the lane starts, the log shows devlanes' own output: a collapsible group p
 | `artifact-name`     | `devlanes-logs-<job id>`  | Name of the logs artifact. Jobs of a matrix share a job id, so later ones get `-2`, `-3` and so on.                                                                                                                  |
 | `retention-days`    | repository setting        | Days to keep the logs artifact.                                                                                                                                                                                      |
 | `cleanup`           | `stop`                    | What the end of the job does: `stop` stops the lane and the daemon this step started, `clean` also runs `devlanes lane clean` and `devlanes infra down` (for self-hosted runners), `keep` leaves everything running. |
-| `token`             | `github.token`            | Token for reading the job's steps from the GitHub API, which `upload-logs: on-failure` uses. |
 
 ## Outputs
 
@@ -137,7 +136,7 @@ devlanes keeps this environment in the daemon's memory and never writes it to di
 
 When `pnpm test:e2e` fails, the end of the job stops the lane and uploads its logs as `devlanes-logs-<job id>`. The artifact holds `unit-<name>.log` for each unit, the daemon's log, the output of `devlanes doctor`, the lane's status and each container's log.
 
-An action cannot read the job's status, so the post step asks the GitHub API which steps of the job failed, with `token`. In a private repository the token needs `actions: read`:
+An action cannot read the job's status, so the post step asks the GitHub API which steps of the job failed. It uses the job's `GITHUB_TOKEN` through the `token` input, which you never need to set. In a private repository that token needs `actions: read`:
 
 ```yaml
 permissions:
@@ -146,6 +145,31 @@ permissions:
 ```
 
 Without it, the action cannot tell and uploads the logs anyway. `upload-logs: always` uploads after every job, and `never` turns uploads off.
+
+### Uploading the logs yourself
+
+For your own artifact name, retention or compression, or to put the logs in an artifact with other files, turn the action's upload off, stop the lane in a step of its own and upload `logs-dir`:
+
+```yaml
+- uses: devlanes-run/action@v1
+  id: devlanes
+  with:
+    upload-logs: never
+- run: pnpm test:e2e
+- if: failure()
+  uses: devlanes-run/action@v1
+  with:
+    command: stop
+    upload-logs: never
+- if: failure()
+  uses: actions/upload-artifact@v4
+  with:
+    name: devlanes-logs
+    path: ${{ steps.devlanes.outputs.logs-dir }}
+    retention-days: 3
+```
+
+The logs are written when the lane stops, so the `stop` step must come before the upload; without it, the lane only stops in the post step, after every other step has run. `logs-dir` then holds the same files as the action's artifact.
 
 ### Sharded tests
 
