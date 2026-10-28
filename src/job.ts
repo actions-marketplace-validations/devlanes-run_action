@@ -25,21 +25,32 @@ export interface StepReport {
 /** Step conclusions that mean the step did not succeed; a timed-out test is the one that needs logs most. */
 const failures = new Set(['failure', 'cancelled', 'timed_out']);
 
+/** Where the action asks from: its post step, or a main step such as `command: stop`. */
+export type Phase = 'main' | 'post';
+
 /**
- * The running job on `runner`, or null when it is not listed. The steps before the first one
- * that has not completed must have completed, and that one must be the step running now (this
- * action's main or post step): a step the API still shows as running before it means the API
- * has not recorded that step's result yet.
+ * The running job on `runner`, or null when it is not listed. From a post step, every main step
+ * has ended, so one the API still shows as running means it has not recorded its result yet.
+ * From a main step only the first step that has not completed may be running, since that one is
+ * this step; the API cannot say which step that is, so a step that lags there goes unnoticed.
  */
-export function stepReport(jobs: Job[], runner: string): StepReport | null {
+export function stepReport(jobs: Job[], runner: string, phase: Phase): StepReport | null {
   const job = jobs.find((entry) => entry.status === 'in_progress' && entry.runner_name === runner);
   if (!job) return null;
   const steps = job.steps ?? [];
-  const current = steps.findIndex((step) => step.status !== 'completed');
-  const settled =
-    current === -1 ||
-    (steps[current]?.status === 'in_progress' &&
-      steps.slice(current + 1).every((step) => step.status !== 'in_progress'));
+  let settled: boolean;
+  if (phase === 'post') {
+    // Post steps and "Complete job" run after the main steps, so they may still be pending.
+    settled = steps
+      .filter((step) => !step.name.startsWith('Post ') && step.name !== 'Complete job')
+      .every((step) => step.status === 'completed');
+  } else {
+    const current = steps.findIndex((step) => step.status !== 'completed');
+    settled =
+      current === -1 ||
+      (steps[current]?.status === 'in_progress' &&
+        steps.slice(current + 1).every((step) => step.status !== 'in_progress'));
+  }
   return {
     failed: steps
       .filter((step) => step.conclusion !== null && failures.has(step.conclusion))
@@ -89,6 +100,7 @@ export type Unknown = { reason: string };
 export async function jobFailedSteps(
   env: NodeJS.ProcessEnv,
   token: string,
+  phase: Phase,
   fetcher: typeof fetch = fetch,
   wait: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms))
 ): Promise<string[] | Unknown> {
@@ -99,7 +111,8 @@ export async function jobFailedSteps(
 
   let reason = 'the API did not record the earlier steps in time';
   for (let attempt = 0; attempt < 10; attempt++) {
-    if (attempt > 0) await wait(2_000);
+    // A main step cannot tell a lagging step from itself, so it gives the API a head start.
+    if (attempt > 0 || phase === 'main') await wait(attempt > 0 ? 2_000 : 3_000);
     const jobs = await runJobs(env, token, fetcher);
     if (jobs === 'refused') {
       return { reason: 'the token cannot read the run; give the job `actions: read`' };
@@ -108,7 +121,7 @@ export async function jobFailedSteps(
       reason = 'the API kept answering with errors';
       continue;
     }
-    const report = stepReport(jobs, RUNNER_NAME);
+    const report = stepReport(jobs, RUNNER_NAME, phase);
     if (!report) return { reason: `the API does not list a running job on ${RUNNER_NAME}` };
     // A failure the API already shows is enough; there is nothing more to wait for.
     if (report.settled || report.failed.length > 0) return report.failed;
@@ -120,10 +133,14 @@ export async function jobFailedSteps(
  * Whether a step of this job failed so far. When the API cannot tell, it answers yes, since
  * uploading logs nobody needed costs less than missing the logs of a failure.
  */
-export async function jobFailed(env: NodeJS.ProcessEnv, token: string): Promise<boolean> {
+export async function jobFailed(
+  env: NodeJS.ProcessEnv,
+  token: string,
+  phase: Phase
+): Promise<boolean> {
   let steps: string[] | Unknown;
   try {
-    steps = await jobFailedSteps(env, token);
+    steps = await jobFailedSteps(env, token, phase);
   } catch (error) {
     steps = { reason: error instanceof Error ? error.message : String(error) };
   }

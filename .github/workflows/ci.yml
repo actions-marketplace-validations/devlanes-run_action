@@ -253,6 +253,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # devlanes gives a Git checkout one lane, so the second project needs a checkout of its own.
+      - name: Checkout again for the second project
+        uses: actions/checkout@v7
+        with:
+          path: second
+
       - name: Start the first project
         id: basic
         uses: ./
@@ -270,7 +276,7 @@ jobs:
         uses: ./
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
-          working-directory: test/fixtures/infra
+          working-directory: second/test/fixtures/infra
           upload-logs: always
           artifact-name: devlanes-logs-two-infra
           cleanup: clean

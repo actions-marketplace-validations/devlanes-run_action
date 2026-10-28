@@ -58,9 +58,24 @@ function api(...answers: (Job[] | number)[]) {
 const noWait = async () => {};
 
 test('the report covers the running job on this runner only', () => {
-  assert.deepEqual(stepReport(failedJob, 'GitHub Actions 2'), { failed: ['Test'], settled: true });
-  assert.deepEqual(stepReport(laggingJob, 'GitHub Actions 2'), { failed: [], settled: false });
-  assert.equal(stepReport(failedJob, 'GitHub Actions 9'), null);
+  assert.deepEqual(stepReport(failedJob, 'GitHub Actions 2', 'post'), {
+    failed: ['Test'],
+    settled: true
+  });
+  assert.deepEqual(stepReport(laggingJob, 'GitHub Actions 2', 'post'), {
+    failed: [],
+    settled: false
+  });
+  assert.equal(stepReport(failedJob, 'GitHub Actions 9', 'post'), null);
+});
+
+test('from the post step, a main step still running means the API is behind', () => {
+  // Seen on GitHub: the post step had started before the API showed it or the failed step's end.
+  const behind = jobs(started, testRunning, step('Post Start the lane', 'pending'), complete);
+  assert.deepEqual(stepReport(behind, 'GitHub Actions 2', 'post'), {
+    failed: [],
+    settled: false
+  });
 });
 
 test('a main step is settled while it runs and later steps wait', () => {
@@ -71,22 +86,25 @@ test('a main step is settled while it runs and later steps wait', () => {
     step('Stop the lane', 'in_progress'),
     step('Deploy', 'pending')
   );
-  assert.deepEqual(stepReport(main, 'GitHub Actions 2'), { failed: [], settled: true });
+  assert.deepEqual(stepReport(main, 'GitHub Actions 2', 'main'), { failed: [], settled: true });
   // The step before it still shows as running, so the API is behind.
   const behind = jobs(started, testRunning, step('Stop the lane', 'in_progress'));
-  assert.deepEqual(stepReport(behind, 'GitHub Actions 2'), { failed: [], settled: false });
+  assert.deepEqual(stepReport(behind, 'GitHub Actions 2', 'main'), {
+    failed: [],
+    settled: false
+  });
 });
 
 test('cancelled and timed-out steps count as failures', () => {
   const cancelled = jobs(started, step('Test', 'completed', 'cancelled'), post);
   const timedOut = jobs(started, step('Test', 'completed', 'timed_out'), post);
-  assert.deepEqual(stepReport(cancelled, 'GitHub Actions 2')?.failed, ['Test']);
-  assert.deepEqual(stepReport(timedOut, 'GitHub Actions 2')?.failed, ['Test']);
+  assert.deepEqual(stepReport(cancelled, 'GitHub Actions 2', 'post')?.failed, ['Test']);
+  assert.deepEqual(stepReport(timedOut, 'GitHub Actions 2', 'post')?.failed, ['Test']);
 });
 
 test('the API is asked for this run attempt with the token', async () => {
   const { fetcher, requests } = api(failedJob);
-  assert.deepEqual(await jobFailedSteps(env, 'token', fetcher, noWait), ['Test']);
+  assert.deepEqual(await jobFailedSteps(env, 'token', 'post', fetcher, noWait), ['Test']);
   assert.deepEqual(requests, [
     {
       url: 'https://api.github.com/repos/acme/app/actions/runs/42/attempts/2/jobs?per_page=100&page=1',
@@ -103,25 +121,41 @@ test('every page of jobs is read', async () => {
     const listed = page === 1 ? [failedJob[0]] : [failedJob[1]];
     return Response.json({ total_count: 2, jobs: listed });
   }) as typeof fetch;
-  assert.deepEqual(await jobFailedSteps(env, '', fetcher, noWait), ['Test']);
+  assert.deepEqual(await jobFailedSteps(env, '', 'post', fetcher, noWait), ['Test']);
   assert.equal(requests.length, 2);
 });
 
 test('steps the API has not recorded yet and server errors are asked about again', async () => {
   const lagging = api(laggingJob, laggingJob, failedJob);
-  assert.deepEqual(await jobFailedSteps(env, 'token', lagging.fetcher, noWait), ['Test']);
+  assert.deepEqual(await jobFailedSteps(env, 'token', 'post', lagging.fetcher, noWait), ['Test']);
   assert.equal(lagging.requests.length, 3);
 
-  assert.deepEqual(await jobFailedSteps(env, 'token', api(503, passedJob).fetcher, noWait), []);
-  assert.deepEqual(await jobFailedSteps(env, 'token', api(laggingJob).fetcher, noWait), {
+  const errors = api(503, passedJob);
+  assert.deepEqual(await jobFailedSteps(env, 'token', 'post', errors.fetcher, noWait), []);
+  assert.deepEqual(await jobFailedSteps(env, 'token', 'post', api(laggingJob).fetcher, noWait), {
     reason: 'the API did not record the earlier steps in time'
   });
 });
 
+test('a main step waits before its first request', async () => {
+  const waits: number[] = [];
+  const main = jobs(started, testPassed, step('Stop the lane', 'in_progress'));
+  const result = await jobFailedSteps(env, 'token', 'main', api(main).fetcher, async (ms) => {
+    waits.push(ms);
+  });
+  assert.deepEqual(result, []);
+  assert.deepEqual(waits, [3_000]);
+});
+
 test('a refused request or a missing variable says why the answer is unknown', async () => {
-  assert.deepEqual(await jobFailedSteps(env, 'token', api(403).fetcher, noWait), {
+  assert.deepEqual(await jobFailedSteps(env, 'token', 'post', api(403).fetcher, noWait), {
     reason: 'the token cannot read the run; give the job `actions: read`'
   });
-  const unset = await jobFailedSteps({ ...env, RUNNER_NAME: undefined }, 'token', api(403).fetcher);
+  const unset = await jobFailedSteps(
+    { ...env, RUNNER_NAME: undefined },
+    'token',
+    'post',
+    api(403).fetcher
+  );
   assert.ok(!Array.isArray(unset));
 });

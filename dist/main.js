@@ -12546,7 +12546,7 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     });
     let failed = result.code !== 0 || failedUnits(lane).length > 0;
     if (inputs.uploadLogs === 'on-failure' && !failed) {
-        failed = await jobFailed(process.env, inputs.token);
+        failed = await jobFailed(process.env, inputs.token, 'main');
     }
     // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
     await writeDiagnostics(devlanes, logsDir, lane);

@@ -316,7 +316,7 @@ async function stop(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<vo
   });
   let failed = result.code !== 0 || failedUnits(lane).length > 0;
   if (inputs.uploadLogs === 'on-failure' && !failed) {
-    failed = await jobFailed(process.env, inputs.token);
+    failed = await jobFailed(process.env, inputs.token, 'main');
   }
 
   // Written even without an upload, since `logs-dir` is what a workflow uploads itself.

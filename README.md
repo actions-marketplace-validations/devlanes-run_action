@@ -204,20 +204,15 @@ steps:
 
 Each shard runs its own lane on its own runner.
 
-### Several projects in one repository
+### A project in a subfolder
 
 ```yaml
 - uses: devlanes-run/action@v1
   with:
     working-directory: apps/storefront
-    artifact-name: devlanes-logs-storefront
-- uses: devlanes-run/action@v1
-  with:
-    working-directory: apps/admin
-    artifact-name: devlanes-logs-admin
 ```
 
-Each use starts its own lane, with its own logs folder and artifact; the first one prepares the runner and starts the daemon both share.
+devlanes gives a Git checkout one lane, so a second `devlanes.yaml` in the same checkout ends up in the first one's lane. To run a second project in the same job, check the repository out again with `actions/checkout`'s `path` and point the second use of the action there. Each use then has its own lane, logs folder and artifact (set `artifact-name` on each), and the first one prepares the runner and starts the daemon both share.
 
 ### Self-hosted runners
 

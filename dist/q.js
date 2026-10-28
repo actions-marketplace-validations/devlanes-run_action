@@ -83036,16 +83036,22 @@ const hostsModes = [
     'timed_out'
 ]);
 /**
- * The running job on `runner`, or null when it is not listed. The steps before the first one
- * that has not completed must have completed, and that one must be the step running now (this
- * action's main or post step): a step the API still shows as running before it means the API
- * has not recorded that step's result yet.
- */ function stepReport(jobs, runner) {
+ * The running job on `runner`, or null when it is not listed. From a post step, every main step
+ * has ended, so one the API still shows as running means it has not recorded its result yet.
+ * From a main step only the first step that has not completed may be running, since that one is
+ * this step; the API cannot say which step that is, so a step that lags there goes unnoticed.
+ */ function stepReport(jobs, runner, phase) {
     const job = jobs.find((entry)=>entry.status === 'in_progress' && entry.runner_name === runner);
     if (!job) return null;
     const steps = job.steps ?? [];
-    const current = steps.findIndex((step)=>step.status !== 'completed');
-    const settled = current === -1 || steps[current]?.status === 'in_progress' && steps.slice(current + 1).every((step)=>step.status !== 'in_progress');
+    let settled;
+    if (phase === 'post') {
+        // Post steps and "Complete job" run after the main steps, so they may still be pending.
+        settled = steps.filter((step)=>!step.name.startsWith('Post ') && step.name !== 'Complete job').every((step)=>step.status === 'completed');
+    } else {
+        const current = steps.findIndex((step)=>step.status !== 'completed');
+        settled = current === -1 || steps[current]?.status === 'in_progress' && steps.slice(current + 1).every((step)=>step.status !== 'in_progress');
+    }
     return {
         failed: steps.filter((step)=>step.conclusion !== null && failures.has(step.conclusion)).map((step)=>step.name),
         settled
@@ -83078,7 +83084,7 @@ const hostsModes = [
  * Failed steps of this job, or why the API cannot tell. The API records a step's result a moment
  * after the step ends, and the next step can start sooner, so it asks again until it has caught
  * up, for about 20 seconds.
- */ async function jobFailedSteps(env, token, fetcher = fetch, wait = (ms)=>new Promise((done)=>setTimeout(done, ms))) {
+ */ async function jobFailedSteps(env, token, phase, fetcher = fetch, wait = (ms)=>new Promise((done)=>setTimeout(done, ms))) {
     const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
     if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) {
         return {
@@ -83087,7 +83093,8 @@ const hostsModes = [
     }
     let reason = 'the API did not record the earlier steps in time';
     for(let attempt = 0; attempt < 10; attempt++){
-        if (attempt > 0) await wait(2000);
+        // A main step cannot tell a lagging step from itself, so it gives the API a head start.
+        if (attempt > 0 || phase === 'main') await wait(attempt > 0 ? 2000 : 3000);
         const jobs = await runJobs(env, token, fetcher);
         if (jobs === 'refused') {
             return {
@@ -83098,7 +83105,7 @@ const hostsModes = [
             reason = 'the API kept answering with errors';
             continue;
         }
-        const report = stepReport(jobs, RUNNER_NAME);
+        const report = stepReport(jobs, RUNNER_NAME, phase);
         if (!report) return {
             reason: `the API does not list a running job on ${RUNNER_NAME}`
         };
@@ -83112,10 +83119,10 @@ const hostsModes = [
 /**
  * Whether a step of this job failed so far. When the API cannot tell, it answers yes, since
  * uploading logs nobody needed costs less than missing the logs of a failure.
- */ async function jobFailed(env, token) {
+ */ async function jobFailed(env, token, phase) {
     let steps;
     try {
-        steps = await jobFailedSteps(env, token);
+        steps = await jobFailedSteps(env, token, phase);
     } catch (error) {
         steps = {
             reason: error instanceof Error ? error.message : String(error)

@@ -60,7 +60,7 @@ async function post(): Promise<void> {
 
     // Steps after the action, such as the tests, count too; only the API knows about them.
     if (inputs.uploadLogs === 'on-failure' && !failed) {
-      failed = await jobFailed(process.env, inputs.token);
+      failed = await jobFailed(process.env, inputs.token, 'post');
     }
     if (shouldUpload(inputs.uploadLogs, failed)) {
       await attempt('upload the devlanes logs', async () => {
