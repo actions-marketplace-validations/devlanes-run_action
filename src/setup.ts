@@ -8,13 +8,17 @@ import { parse } from 'yaml';
 import { type Devlanes, parseJson } from './devlanes.ts';
 
 /**
- * Settings every CI daemon gets. A lane would otherwise freeze after 15 minutes without
- * requests, such as during a build between `start` and the tests, and the start gate would
- * pace services for a laptop that also runs an editor and a browser.
+ * Settings every CI daemon gets. A lane without requests would otherwise be throttled after 5
+ * minutes and frozen after 15, such as during a build between `start` and the tests. From
+ * devlanes 0.7.0 a daemon that only commands used exits after about 5 idle minutes, which would
+ * end the daemon `command: install` started before a later step uses it; the post step stops it.
+ * The start gate keeps its adaptive default: it starts at full speed and only backs off when
+ * CPU or memory runs short, which on a small runner is what keeps a large start from swapping.
  */
 export const ciConfig: [string, string][] = [
   ['lanes.freeze_after', '0s'],
-  ['startup.mode', 'all']
+  ['lanes.throttle_after', '0s'],
+  ['daemon.exit_when_idle', 'false']
 ];
 
 /** One `devlanes config set` (or `unset`, for a null value). */
