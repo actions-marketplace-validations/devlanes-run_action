@@ -24,7 +24,7 @@ Tests read their base URLs from `DEVLANES_PUBLIC_URL_<SERVICE>`, such as `DEVLAN
 
 `install` installs and prepares devlanes and starts the daemon, for workflows that call `devlanes` themselves. Later steps find `devlanes` on `PATH`.
 
-While the lane starts, the log shows devlanes' own output: a collapsible group per start phase (infra, setup, tasks, services) and an error annotation with the last log lines of each unit that failed. When the lane stops, devlanes adds a table of each unit's peak CPU and memory to the job summary.
+While the lane starts, the log shows devlanes' own output: a collapsible group per start phase (infra, setup, tasks, services) and an error annotation with the last log lines of each unit that failed. When the lane stops, devlanes adds a table of each unit's CPU and memory use to the job summary.
 
 ## Inputs
 
@@ -268,7 +268,7 @@ The proxy serves every hostname over HTTPS with certificates from a devlanes CA 
 
 `export-ca` sets `NODE_EXTRA_CA_CERTS` and `DENO_CERT` to the CA, and `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` to a bundle of the system roots plus the CA, for later steps and the `with` script. Node, Bun, Deno, Python and tools built on OpenSSL then trust the proxy on every OS. When the workflow already points one of these variables at its own file, the action writes a file with both certificates and points the variable there. Services started by devlanes get devlanes' own CA variables, not that combined file.
 
-On Linux, `trust` adds the CA to the system store, which `curl` reads, and to the NSS store that Chromium reads, including Playwright's. The action runs `devlanes certs trust` with `tls.trust: [system, chrome]`, installing `libnss3-tools` first when `certutil` is missing. Firefox has its own store; set the whole list through `config` to add it:
+On Linux, `trust` adds the CA to the system store, which `curl` reads, and to the NSS store that Chromium reads, including Playwright's. The action runs `devlanes certs trust` with `tls.trust: [system, chrome]`, installing `libnss3-tools` first when `certutil` is missing. A Firefox installed on the runner has its own store in its profiles; set the whole list through `config` to add it (Playwright's Firefox starts with a fresh profile each time and does not read it):
 
 ```yaml
 - uses: devlanes-run/action@v0
