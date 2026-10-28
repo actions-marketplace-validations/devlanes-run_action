@@ -82945,17 +82945,18 @@ const hostsModes = [
 // Whether the job has a failed step, for the post step's `upload-logs: on-failure`. An action
 // cannot read `job.status`, so this asks the API for the job that runs on this runner.
 
-/** Names of the failed steps of the running job on `runner`, or null when it is not listed. */ function failedSteps(jobs, runner) {
+/** The running job on `runner`, or null when it is not listed. */ function stepReport(jobs, runner) {
     const job = jobs.find((entry)=>entry.status === 'in_progress' && entry.runner_name === runner);
     if (!job) return null;
-    return (job.steps ?? []).filter((step)=>step.conclusion === 'failure').map((step)=>step.name);
+    const steps = job.steps ?? [];
+    return {
+        failed: steps.filter((step)=>step.conclusion === 'failure').map((step)=>step.name),
+        // Post steps and "Complete job" run after the main steps, so they are still pending here.
+        settled: steps.filter((step)=>!step.name.startsWith('Post ') && step.name !== 'Complete job').every((step)=>step.status === 'completed')
+    };
 }
-/**
- * Failed steps of this job, or null when the API cannot tell (a token without `actions: read`
- * on a private repository, or GitHub Enterprise Server without the endpoint).
- */ async function jobFailedSteps(env, token, fetcher = fetch) {
-    const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
-    if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) return null;
+/** Every job of this run attempt, or null when the API refuses. */ async function runJobs(env, token, fetcher) {
+    const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = env;
     const attempt = env.GITHUB_RUN_ATTEMPT || '1';
     const jobs = [];
     for(let page = 1; page <= 10; page++){
@@ -82974,7 +82975,27 @@ const hostsModes = [
         jobs.push(...body.jobs);
         if (jobs.length >= body.total_count || body.jobs.length === 0) break;
     }
-    return failedSteps(jobs, RUNNER_NAME);
+    return jobs;
+}
+/**
+ * Failed steps of this job, or null when the API cannot tell (a token without `actions: read`
+ * on a private repository, GitHub Enterprise Server without the endpoint, or step results that
+ * never arrive). The API records a step's result a moment after it ends, and the post step can
+ * start sooner, so it asks again until every main step shows as completed.
+ */ async function jobFailedSteps(env, token, fetcher = fetch, wait = (ms)=>new Promise((done)=>setTimeout(done, ms))) {
+    const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
+    if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) return null;
+    for(let attempt = 0; attempt < 10; attempt++){
+        if (attempt > 0) await wait(2000);
+        const jobs = await runJobs(env, token, fetcher);
+        if (!jobs) return null;
+        const report = stepReport(jobs, RUNNER_NAME);
+        if (!report) return null;
+        if (report.settled) return report.failed;
+        // A failure the API already shows is enough; there is nothing more to wait for.
+        if (report.failed.length > 0) return report.failed;
+    }
+    return null;
 }
 /**
  * Whether a step of this job failed so far. When the API cannot tell, it answers yes, since
@@ -82991,7 +83012,9 @@ const hostsModes = [
         core_info('Could not tell whether a step failed; uploading the logs to be safe');
         return true;
     }
-    if (steps.length > 0) core_info(`Uploading the logs because these steps failed: ${steps.join(', ')}`);
+    if (steps.length > 0) {
+        core_info(`Uploading the logs because these steps failed: ${steps.join(', ')}`);
+    }
     return steps.length > 0;
 }
 
