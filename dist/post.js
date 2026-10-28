@@ -1,4 +1,4 @@
-import { cli, getInput, shouldUpload, uploadLogs, stoppedVariable, core_info, readInputs, removeHosts, defaultArtifactName, core_warning, jobFailed, writeDiagnostics, failedUnits, childEnv, hostsPath, loadState } from "./q.js";
+import { cli, getInput, shouldUpload, uploadLogs, core_info, readInputs, removeHosts, defaultArtifactName, core_warning, jobFailed, stoppedLanes, writeDiagnostics, failedUnits, childEnv, hostsPath, laneLogsDir, loadState } from "./q.js";
 
 // The action's post step, which the runner runs at the end of the job even after a failure or
 // a cancellation: stop the lane, upload its logs and stop the daemon this invocation started.
@@ -17,43 +17,44 @@ import { cli, getInput, shouldUpload, uploadLogs, stoppedVariable, core_info, re
     if (!state) return;
     const inputs = readInputs((name)=>getInput(name), process.platform);
     if (inputs.cleanup === 'keep') {
-        core_info('cleanup is keep; leaving the lane and the daemon running');
+        core_info('cleanup is keep; leaving the lane and the daemon running and uploading no logs');
         return;
     }
-    const devlanes = cli(state.bin, childEnv(process.env, inputs.home));
-    // A later `command: stop` step already stopped the lane and uploaded its logs.
-    const stopped = process.env[stoppedVariable] === '1';
-    let failed = state.failed;
-    let lane;
-    if (!stopped && inputs.command !== 'install') {
-        const reference = state.lane || await currentLane(devlanes, state.cwd);
-        if (reference) {
-            lane = await attempt('read the lane status', async ()=>{
-                const page = await devlanes.json([
-                    'status',
-                    reference
-                ], {
-                    cwd: state.cwd
-                });
-                return page.items.find((item)=>item.reference === reference) ?? page.items[0];
+    // The home this invocation used, even when a later use of the action exported another one.
+    const devlanes = cli(state.bin, childEnv(process.env, state.home));
+    const reference = inputs.command === 'install' ? '' : state.lane || await currentLane(devlanes, state.cwd);
+    // A later `command: stop` step already stopped this lane and uploaded its logs.
+    const stopped = reference !== '' && stoppedLanes(process.env).includes(reference);
+    // Empty when the main step failed before it read the lane.
+    state.logsDir ||= laneLogsDir(process.env, reference);
+    if (reference && !stopped) {
+        let failed = state.failed;
+        const lane = await attempt('read the lane status', async ()=>{
+            const page = await devlanes.json([
+                'status',
+                reference
+            ], {
+                cwd: state.cwd
             });
-            if (failedUnits(lane).length > 0) failed = true;
-            // `with` already stopped what it started and wrote its logs.
-            if (inputs.command === 'start') {
-                const result = await devlanes.run([
-                    'stop',
-                    '--lane',
-                    reference,
-                    '--logs-dir',
-                    state.logsDir
-                ], {
-                    cwd: state.cwd,
-                    stream: true
-                });
-                if (result.code !== 0) {
-                    failed = true;
-                    core_warning(`devlanes stop exited ${result.code}`);
-                }
+            return page.items.find((item)=>item.reference === reference) ?? page.items[0];
+        });
+        if (failedUnits(lane).length > 0) failed = true;
+        // `with` stops what it started and writes its logs, unless it never returned (a cancelled
+        // step on Windows ends it at once), which leaves the lane running.
+        if (inputs.command === 'start' || !state.withDone) {
+            const result = await devlanes.run([
+                'stop',
+                '--lane',
+                reference,
+                '--logs-dir',
+                state.logsDir
+            ], {
+                cwd: state.cwd,
+                stream: true
+            });
+            if (result.code !== 0) {
+                failed = true;
+                core_warning(`devlanes stop exited ${result.code}`);
             }
         }
         // Steps after the action, such as the tests, count too; only the API knows about them.
@@ -66,42 +67,39 @@ import { cli, getInput, shouldUpload, uploadLogs, stoppedVariable, core_info, re
                 await uploadLogs(state.logsDir, inputs.artifactName || defaultArtifactName(process.env), inputs.retentionDays);
             });
         }
-        if (inputs.cleanup === 'clean' && reference) {
-            await attempt('clean the lane', async ()=>{
-                await devlanes.run([
-                    'lane',
-                    'clean',
-                    reference,
-                    '--yes'
-                ], {
-                    cwd: state.cwd,
-                    stream: true
-                });
-                await devlanes.run([
-                    'infra',
-                    'down',
-                    '--yes'
-                ], {
-                    cwd: state.cwd,
-                    stream: true
-                });
-            });
-        }
     }
-    if (state.hostsWritten) {
-        await attempt('remove the hostnames from the hosts file', ()=>removeHosts(hostsPath(process.env)));
+    if (inputs.cleanup === 'clean' && reference) {
+        await run(devlanes, [
+            'lane',
+            'clean',
+            reference,
+            '--yes'
+        ], state.cwd);
+        await run(devlanes, [
+            'infra',
+            'down',
+            '--yes'
+        ], state.cwd);
     }
-    if (state.daemonStarted) {
-        await attempt('stop the daemon', async ()=>{
-            await devlanes.run([
-                'daemon',
-                'stop',
-                '--yes'
-            ], {
-                stream: true
-            });
+    if (state.hostsLane) {
+        await attempt('remove the hostnames from the hosts file', ()=>removeHosts(process.platform, hostsPath(process.platform, process.env), state.hostsLane));
+    }
+    if (state.daemonStarted) await run(devlanes, [
+        'daemon',
+        'stop',
+        '--yes'
+    ]);
+}
+/** Runs a devlanes command into the log, warning when it fails. */ async function run(devlanes, args, cwd) {
+    await attempt(`run devlanes ${args.join(' ')}`, async ()=>{
+        const result = await devlanes.run(args, cwd ? {
+            cwd,
+            stream: true
+        } : {
+            stream: true
         });
-    }
+        if (result.code !== 0) throw new Error(`it exited ${result.code}`);
+    });
 }
 /** The lane of `cwd`, for a main step that ended before it could save it. */ async function currentLane(devlanes, cwd) {
     const laneEnv = await attempt('read the lane', ()=>devlanes.json([

@@ -3,17 +3,19 @@
 
 import * as core from '@actions/core';
 
-/** State saved by the main step. */
+/** State saved by the main step once the daemon is set up; without it the post step does nothing. */
 export interface State {
-  /** Set once setup finished; the post step does nothing without it. */
   bin: string;
+  /** The resolved devlanes home, so the post step reaches this invocation's daemon. */
   home: string;
   cwd: string;
   logsDir: string;
   lane: string;
   daemonStarted: boolean;
-  /** The Windows hosts file has the action's block, which the post step removes. */
-  hostsWritten: boolean;
+  /** The lane whose block the hosts file has, which the post step removes; empty for none. */
+  hostsLane: string;
+  /** `devlanes with` returned; when false after `command: with`, its lane may still run. */
+  withDone: boolean;
   failed: boolean;
 }
 
@@ -33,5 +35,13 @@ export function loadState(): State | null {
 /** Set in `$GITHUB_ENV` once a job has a configured daemon, so later uses skip setup. */
 export const readyVariable = 'DEVLANES_ACTION_READY';
 
-/** Set in `$GITHUB_ENV` after `command: stop`, so post steps do not stop the lane again. */
+/**
+ * Set in `$GITHUB_ENV` by `command: stop` to the lanes it stopped, one per line, so the post
+ * steps of earlier uses skip those lanes and still stop any other.
+ */
 export const stoppedVariable = 'DEVLANES_ACTION_STOPPED';
+
+/** Lanes a `command: stop` already stopped in this job. */
+export function stoppedLanes(env: NodeJS.ProcessEnv): string[] {
+  return (env[stoppedVariable] ?? '').split('\n').filter(Boolean);
+}

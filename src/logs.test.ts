@@ -8,8 +8,17 @@ import {
   defaultArtifactName,
   filesUnder,
   isNameTaken,
+  laneLogsDir,
   shouldUpload
 } from './logs.ts';
+
+test('each lane gets its own logs folder under the runner temp', () => {
+  assert.equal(
+    laneLogsDir({ RUNNER_TEMP: join('tmp') }, 'acme@0'),
+    join('tmp', 'devlanes-logs', 'acme_0')
+  );
+  assert.equal(laneLogsDir({ RUNNER_TEMP: join('tmp') }, ''), join('tmp', 'devlanes-logs', 'lane'));
+});
 
 test('upload modes', () => {
   assert.equal(shouldUpload('always', false), true);

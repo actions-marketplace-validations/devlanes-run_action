@@ -57,7 +57,8 @@ jobs:
           if [ -n "$(git status --porcelain -- dist)" ]; then
             git status --short -- dist
             git diff --stat -- dist
-            git diff -- dist | head -100
+            # .gitattributes marks dist/ as -diff, which would print only "Binary files differ".
+            git diff --text -- dist | head -100
             echo "::error::dist/ differs from a fresh build; run pnpm build and commit dist/"
             exit 1
           fi
@@ -69,7 +70,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        # macos-15 resolves *.localhost only through the hosts entries the action writes.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15, windows-latest]
         command: [start, with]
     steps:
       - name: Checkout
@@ -82,7 +84,7 @@ jobs:
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
           working-directory: test/fixtures/basic
-          # Every matrix job uploads under the same default name, which checks the -N suffixes.
+          # Every start job uploads under the same default name; the artifacts job counts them.
           upload-logs: always
           retention-days: 1
 
@@ -213,10 +215,110 @@ jobs:
       - name: Fail like a test would
         run: exit 1
 
+  quiet:
+    name: Passing job with a stop step
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start the lane
+        id: devlanes
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/basic
+          artifact-name: devlanes-logs-quiet
+
+      # Nothing failed, so neither this step nor the post step may upload anything.
+      - name: Stop the lane
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: stop
+          working-directory: test/fixtures/basic
+          artifact-name: devlanes-logs-quiet-stop
+
+      - name: Check the start step's logs-dir has the logs
+        run: node test/e2e/logs.mjs "$LOGS" unit-api.log unit-worker.log devlanes-doctor.txt
+        env:
+          LOGS: ${{ steps.devlanes.outputs.logs-dir }}
+
+  two-lanes:
+    name: Two projects in one job
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start the first project
+        id: basic
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/basic
+          config: |
+            proxy:
+              lan: false
+          upload-logs: always
+          artifact-name: devlanes-logs-two-basic
+
+      - name: Start the second project
+        id: infra
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/infra
+          upload-logs: always
+          artifact-name: devlanes-logs-two-infra
+          cleanup: clean
+
+      - name: Check each lane has its own logs folder
+        if: steps.basic.outputs.logs-dir == steps.infra.outputs.logs-dir
+        run: |
+          echo "::error::both lanes write to ${{ steps.basic.outputs.logs-dir }}"
+          exit 1
+
+      # The first project's post step must skip its stopped lane and leave the second alone.
+      - name: Stop the first project
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: stop
+          working-directory: test/fixtures/basic
+          upload-logs: never
+
+  install:
+    name: Install only on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install devlanes
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: install
+
+      - name: Use devlanes from a later step
+        shell: bash
+        run: |
+          devlanes --version
+          devlanes daemon status
+          test -n "$NODE_EXTRA_CA_CERTS"
+
   artifacts:
     name: Uploaded logs
     if: ${{ !cancelled() }}
-    needs: [infra, failure, failed-test]
+    needs: [e2e, infra, failure, failed-test, quiet, two-lanes]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -239,3 +341,24 @@ jobs:
 
       - name: Check the logs of a job whose test step failed
         run: node test/e2e/logs.mjs artifacts/devlanes-logs-failed-test unit-api.log unit-worker.log
+
+      - name: Check the second project's logs and that the stopped one uploaded nothing
+        run: |
+          node test/e2e/logs.mjs artifacts/devlanes-logs-two-infra unit-api.log infra-whoami.log
+          test ! -e artifacts/devlanes-logs-two-basic
+
+      - name: Check passing jobs uploaded nothing and matrix jobs took free names
+        shell: bash
+        run: |
+          shopt -s nullglob
+          quiet=(artifacts/devlanes-logs-quiet*)
+          if [ ${#quiet[@]} -ne 0 ]; then
+            echo "::error::a passing job uploaded ${quiet[*]}"
+            exit 1
+          fi
+          # One artifact per start job of the e2e matrix, none from its passing with jobs.
+          e2e=(artifacts/devlanes-logs-e2e*)
+          if [ ${#e2e[@]} -ne 5 ]; then
+            echo "::error::expected 5 e2e artifacts, found ${#e2e[@]}: ${e2e[*]}"
+            exit 1
+          fi

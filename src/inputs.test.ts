@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parse } from 'yaml';
-import { defaultVersion, list, readInputs, version } from './inputs.ts';
+import {
+  compareVersions,
+  defaultVersion,
+  list,
+  minimumVersion,
+  readInputs,
+  version
+} from './inputs.ts';
 
 /** An input reader over a fixed map, empty for anything missing, as the runner does. */
 function reader(values: Record<string, string>) {
@@ -97,9 +104,23 @@ test('versions accept latest, next and exact releases with or without v', () => 
   assert.equal(version(''), defaultVersion);
   assert.equal(version('Latest'), 'latest');
   assert.equal(version('next'), 'next');
-  assert.equal(version('0.6.1'), '0.6.1');
-  assert.equal(version('v0.6.1'), '0.6.1');
+  assert.equal(version('0.7.0'), '0.7.0');
+  assert.equal(version('v0.7.2'), '0.7.2');
   assert.equal(version('1.0.0-rc.1'), '1.0.0-rc.1');
-  assert.throws(() => version('0.6'), /must be latest, next or a version/);
-  assert.throws(() => version('^0.6.0'), /must be latest, next or a version/);
+  assert.throws(() => version('0.7'), /must be latest, next or a version/);
+  assert.throws(() => version('^0.7.0'), /must be latest, next or a version/);
+});
+
+test('versions older than the minimum are refused', () => {
+  assert.equal(minimumVersion, '0.7.0');
+  assert.throws(() => version('0.6.1'), /devlanes 0\.6\.1 is too old for this action; use 0\.7\.0/);
+  assert.throws(() => version('0.7.0-rc.1'), /too old/);
+  assert.ok(compareVersions(defaultVersion, minimumVersion) >= 0);
+});
+
+test('versions order like semver', () => {
+  assert.equal(compareVersions('0.7.0', '0.7.0'), 0);
+  assert.equal(compareVersions('0.10.0', '0.9.9'), 1);
+  assert.equal(compareVersions('1.0.0-rc.1', '1.0.0'), -1);
+  assert.equal(compareVersions('1.0.0-rc.2', '1.0.0-rc.1'), 1);
 });

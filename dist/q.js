@@ -10,8 +10,8 @@ import { lookup } from "node:dns/promises";
 import { mkdir as promises_mkdir, readFile, writeFile as promises_writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import node_fs, { readdirSync } from "node:fs";
+import node_os, { EOL as external_node_os_EOL, tmpdir } from "node:os";
 import { normalize, resolve as external_path_resolve } from "path";
-import node_os, { EOL as external_node_os_EOL } from "node:os";
 import node_util, { inspect } from "node:util";
 import node_process from "node:process";
 import node_http from "node:http";
@@ -82694,8 +82694,10 @@ function getIDToken(aud) {
     }
 }
 /**
- * Starts `bin` and resolves with its exit status. A signal sent to the action (a cancelled
- * job) is passed on, so `devlanes with` can stop what it started before the runner kills it.
+ * Starts `bin` and resolves with its exit status. On Linux and macOS a signal sent to the action
+ * (a cancelled job) is passed on, so `devlanes with` can stop what it started before the runner
+ * kills it. Windows delivers the runner's Ctrl-C to every process on the console already, and
+ * `child.kill` there would end devlanes at once instead.
  */ function spawnProcess(bin, args, env, options) {
     return new Promise((resolve, reject)=>{
         const child = spawn(bin, args, {
@@ -82720,7 +82722,10 @@ function getIDToken(aud) {
         child.stderr?.setEncoding('utf8').on('data', (chunk)=>{
             stderr += chunk;
         });
-        const forward = (signal)=>child.kill(signal);
+        // A listener also keeps Node from exiting on the signal before devlanes has finished.
+        const forward = (signal)=>{
+            if (process.platform !== 'win32') child.kill(signal);
+        };
         process.on('SIGINT', forward);
         process.on('SIGTERM', forward);
         const settle = ()=>{
@@ -82779,15 +82784,17 @@ function getIDToken(aud) {
 
 
 
-// Hosts file entries for the lane's hostnames on Windows runners. Windows 11 answers *.localhost
-// with loopback by itself, but Windows Server 2025 (windows-latest) does not, and devlanes never
-// writes the hosts file on Windows. Runners are elevated, so the action can.
+
+// Hosts file entries for the lane's hostnames on runners whose resolver does not answer
+// *.localhost: Windows Server 2025 (windows-latest) and macOS before 26. Linux runners resolve
+// those names, and devlanes' own helper covers programs that skip the resolver there. Windows
+// runners are elevated and macOS runners have passwordless sudo, so the action can write the file.
 
 
 
-const hosts_begin = '# devlanes action begin';
-const hosts_end = '# devlanes action end';
-/** The Windows hosts file. */ function hostsPath(env) {
+
+/** The hosts file of `platform`. */ function hostsPath(platform, env) {
+    if (platform !== 'win32') return '/etc/hosts';
     return join(env.SystemRoot ?? 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
 }
 /** Exact hostnames of a lane's services and containers, from the https URLs it lists. */ function laneHostnames(lane) {
@@ -82798,7 +82805,12 @@ const hosts_end = '# devlanes action end';
     const hosts = new Set();
     for (const url of urls){
         if (!url.startsWith('https://')) continue;
-        const { hostname } = new URL(url);
+        let hostname;
+        try {
+            hostname = new URL(url).hostname;
+        } catch  {
+            continue;
+        }
         // A hosts file takes only exact names; wildcards need devlanes' resolver strategy.
         if (!hostname.includes('*')) hosts.add(hostname);
     }
@@ -82806,18 +82818,28 @@ const hosts_end = '# devlanes action end';
         ...hosts
     ].sort();
 }
-/** `text` without the action's block. */ function withoutBlock(text) {
-    const pattern = new RegExp(`${hosts_begin}[\\s\\S]*?${hosts_end}\\r?\\n?`, 'g');
-    return text.replace(pattern, '');
-}
-/** `text` with the action's block listing `hosts`, replacing an earlier block. */ function withBlock(text, hosts) {
-    const rest = withoutBlock(text).replace(/\s*$/, '');
-    const lines = [
-        hosts_begin,
-        ...hosts.map((host)=>`127.0.0.1 ${host}`),
-        hosts_end
+/** The markers of the block of lane `id`, so two lanes in one job keep their own entries. */ function markers(id) {
+    return [
+        `# devlanes action begin ${id}`,
+        `# devlanes action end ${id}`
     ];
-    return `${rest}${rest ? '\r\n' : ''}${lines.join('\r\n')}\r\n`;
+}
+/** Escapes `text` for use inside a regular expression. */ function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/** `text` without the block of `id`. */ function withoutBlock(text, id) {
+    const [begin, end] = markers(id).map(escapeRegExp);
+    return text.replace(new RegExp(`${begin}\\r?\\n[\\s\\S]*?${end}\\r?\\n?`, 'g'), '');
+}
+/** `text` with the block of `id` listing `hosts`, replacing an earlier block of `id`. */ function withBlock(text, id, hosts, eol) {
+    const rest = withoutBlock(text, id).replace(/\s*$/, '');
+    const [begin, end] = markers(id);
+    const lines = [
+        begin,
+        ...hosts.map((host)=>`127.0.0.1 ${host}`),
+        end
+    ];
+    return `${rest}${rest ? eol : ''}${lines.join(eol)}${eol}`;
 }
 /** Whether `host` already resolves to loopback. */ async function resolvesToLoopback(host) {
     try {
@@ -82827,13 +82849,55 @@ const hosts_end = '# devlanes action end';
         return false;
     }
 }
-/** Writes the block with `hosts` into the hosts file at `path`. */ async function addHosts(path, hosts) {
-    await promises_writeFile(path, withBlock(await readFile(path, 'utf8'), hosts));
+/** Runs `sudo -n` with `args`, feeding `input` on stdin, and fails on a non-zero exit. */ function sudo(args, input = '') {
+    return new Promise((resolve, reject)=>{
+        const child = spawn('sudo', [
+            '-n',
+            ...args
+        ], {
+            stdio: [
+                'pipe',
+                'ignore',
+                'pipe'
+            ]
+        });
+        let stderr = '';
+        child.stderr.setEncoding('utf8').on('data', (chunk)=>{
+            stderr += chunk;
+        });
+        child.on('error', reject);
+        child.on('close', (code)=>code === 0 ? resolve() : reject(new Error(`sudo ${args[0]} exited ${code}: ${stderr.trim()}`)));
+        child.stdin.end(input);
+    });
 }
-/** Removes the action's block from the hosts file at `path`. */ async function removeHosts(path) {
+/** Replaces the hosts file with `text`, through sudo on macOS, and makes the resolver reread it. */ async function writeHosts(platform, path, text) {
+    if (platform === 'win32') {
+        // The DNS client watches the file, so new entries resolve without a cache flush.
+        await promises_writeFile(path, text);
+        return;
+    }
+    await sudo([
+        'tee',
+        path
+    ], text);
+    await sudo([
+        'dscacheutil',
+        '-flushcache'
+    ]);
+    await sudo([
+        'killall',
+        '-HUP',
+        'mDNSResponder'
+    ]).catch(()=>{});
+}
+/** Writes the block of lane `id` with `hosts` into the hosts file. */ async function addHosts(platform, path, id, hosts) {
+    const eol = platform === 'win32' ? '\r\n' : '\n';
+    await writeHosts(platform, path, withBlock(await readFile(path, 'utf8'), id, hosts, eol));
+}
+/** Removes the block of lane `id` from the hosts file. */ async function removeHosts(platform, path, id) {
     const text = await readFile(path, 'utf8');
-    const cleaned = withoutBlock(text);
-    if (cleaned !== text) await promises_writeFile(path, cleaned);
+    const cleaned = withoutBlock(text, id);
+    if (cleaned !== text) await writeHosts(platform, path, cleaned);
 }
 
 // Reads the action's inputs once, so the rest of the code works with typed values and every
@@ -82904,7 +82968,8 @@ const hostsModes = [
 /**
  * The devlanes version this release of the action was tested with. action.yml has the same
  * default; an explicitly empty `version:` (such as an unset matrix value) gets it too.
- */ const defaultVersion = '0.6.1';
+ */ const defaultVersion = '0.7.0';
+/** The oldest devlanes the action supports; its CI runs against nothing older. */ const minimumVersion = '0.7.0';
 /** A `version` input normalized to `latest`, `next` or a bare `X.Y.Z[-pre]`. */ function inputs_version(value) {
     const trimmed = value.trim().toLowerCase();
     if (!trimmed) return defaultVersion;
@@ -82912,9 +82977,29 @@ const hostsModes = [
     if (trimmed === 'next') return 'next';
     const bare = trimmed.startsWith('v') ? trimmed.slice(1) : trimmed;
     if (!/^\d+\.\d+\.\d+(-[0-9a-z.-]+)?$/.test(bare)) {
-        throw new Error(`Input "version" must be latest, next or a version such as 0.6.1, not "${value}"`);
+        throw new Error(`Input "version" must be latest, next or a version such as ${defaultVersion}, not "${value}"`);
+    }
+    if (compareVersions(bare, minimumVersion) < 0) {
+        throw new Error(`devlanes ${bare} is too old for this action; use ${minimumVersion} or later`);
     }
     return bare;
+}
+/**
+ * Orders two `X.Y.Z[-pre]` versions as semver does: by number, then a prerelease before its
+ * release. Prerelease identifiers compare as text, which is enough for `-rc.N`-style tags.
+ */ function compareVersions(a, b) {
+    const [aCore = '', aPre] = a.split('-', 2);
+    const [bCore = '', bPre] = b.split('-', 2);
+    const aParts = aCore.split('.').map(Number);
+    const bParts = bCore.split('.').map(Number);
+    for(let index = 0; index < 3; index++){
+        const difference = (aParts[index] ?? 0) - (bParts[index] ?? 0);
+        if (difference !== 0) return Math.sign(difference);
+    }
+    if (aPre === bPre) return 0;
+    if (aPre === undefined) return 1;
+    if (bPre === undefined) return -1;
+    return aPre < bPre ? -1 : 1;
 }
 /** Non-empty entries of a list input split by `separator`. */ function inputs_list(value, separator) {
     return value.split(separator).map((entry)=>entry.trim()).filter(Boolean);
@@ -82942,20 +83027,31 @@ const hostsModes = [
     return days;
 }
 
-// Whether the job has a failed step, for the post step's `upload-logs: on-failure`. An action
-// cannot read `job.status`, so this asks the API for the job that runs on this runner.
+// Whether the job has a failed step, for `upload-logs: on-failure`. An action cannot read
+// `job.status`, so this asks the API for the job that runs on this runner.
 
-/** The running job on `runner`, or null when it is not listed. */ function stepReport(jobs, runner) {
+/** Step conclusions that mean the step did not succeed; a timed-out test is the one that needs logs most. */ const failures = new Set([
+    'failure',
+    'cancelled',
+    'timed_out'
+]);
+/**
+ * The running job on `runner`, or null when it is not listed. The steps before the first one
+ * that has not completed must have completed, and that one must be the step running now (this
+ * action's main or post step): a step the API still shows as running before it means the API
+ * has not recorded that step's result yet.
+ */ function stepReport(jobs, runner) {
     const job = jobs.find((entry)=>entry.status === 'in_progress' && entry.runner_name === runner);
     if (!job) return null;
     const steps = job.steps ?? [];
+    const current = steps.findIndex((step)=>step.status !== 'completed');
+    const settled = current === -1 || steps[current]?.status === 'in_progress' && steps.slice(current + 1).every((step)=>step.status !== 'in_progress');
     return {
-        failed: steps.filter((step)=>step.conclusion === 'failure').map((step)=>step.name),
-        // Post steps and "Complete job" run after the main steps, so they are still pending here.
-        settled: steps.filter((step)=>!step.name.startsWith('Post ') && step.name !== 'Complete job').every((step)=>step.status === 'completed')
+        failed: steps.filter((step)=>step.conclusion !== null && failures.has(step.conclusion)).map((step)=>step.name),
+        settled
     };
 }
-/** Every job of this run attempt, or null when the API refuses. */ async function runJobs(env, token, fetcher) {
+/** Every job of this run attempt, across pages. */ async function runJobs(env, token, fetcher) {
     const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = env;
     const attempt = env.GITHUB_RUN_ATTEMPT || '1';
     const jobs = [];
@@ -82970,7 +83066,8 @@ const hostsModes = [
             },
             signal: AbortSignal.timeout(15000)
         });
-        if (!response.ok) return null;
+        if (response.status === 429 || response.status >= 500) return 'retry';
+        if (!response.ok) return 'refused';
         const body = await response.json();
         jobs.push(...body.jobs);
         if (jobs.length >= body.total_count || body.jobs.length === 0) break;
@@ -82978,24 +83075,39 @@ const hostsModes = [
     return jobs;
 }
 /**
- * Failed steps of this job, or null when the API cannot tell (a token without `actions: read`
- * on a private repository, GitHub Enterprise Server without the endpoint, or step results that
- * never arrive). The API records a step's result a moment after it ends, and the post step can
- * start sooner, so it asks again until every main step shows as completed.
+ * Failed steps of this job, or why the API cannot tell. The API records a step's result a moment
+ * after the step ends, and the next step can start sooner, so it asks again until it has caught
+ * up, for about 20 seconds.
  */ async function jobFailedSteps(env, token, fetcher = fetch, wait = (ms)=>new Promise((done)=>setTimeout(done, ms))) {
     const { GITHUB_API_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID, RUNNER_NAME } = env;
-    if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) return null;
+    if (!GITHUB_API_URL || !GITHUB_REPOSITORY || !GITHUB_RUN_ID || !RUNNER_NAME) {
+        return {
+            reason: 'the runner did not set the run and runner variables'
+        };
+    }
+    let reason = 'the API did not record the earlier steps in time';
     for(let attempt = 0; attempt < 10; attempt++){
         if (attempt > 0) await wait(2000);
         const jobs = await runJobs(env, token, fetcher);
-        if (!jobs) return null;
+        if (jobs === 'refused') {
+            return {
+                reason: 'the token cannot read the run; give the job `actions: read`'
+            };
+        }
+        if (jobs === 'retry') {
+            reason = 'the API kept answering with errors';
+            continue;
+        }
         const report = stepReport(jobs, RUNNER_NAME);
-        if (!report) return null;
-        if (report.settled) return report.failed;
+        if (!report) return {
+            reason: `the API does not list a running job on ${RUNNER_NAME}`
+        };
         // A failure the API already shows is enough; there is nothing more to wait for.
-        if (report.failed.length > 0) return report.failed;
+        if (report.settled || report.failed.length > 0) return report.failed;
     }
-    return null;
+    return {
+        reason
+    };
 }
 /**
  * Whether a step of this job failed so far. When the API cannot tell, it answers yes, since
@@ -83005,11 +83117,12 @@ const hostsModes = [
     try {
         steps = await jobFailedSteps(env, token);
     } catch (error) {
-        core_info(`Could not read the job's steps: ${error instanceof Error ? error.message : error}`);
-        steps = null;
+        steps = {
+            reason: error instanceof Error ? error.message : String(error)
+        };
     }
-    if (steps === null) {
-        core_info('Could not tell whether a step failed; uploading the logs to be safe');
+    if (!Array.isArray(steps)) {
+        core_warning(`Uploading the logs because the action could not tell whether a step failed: ${steps.reason}`);
         return true;
     }
     if (steps.length > 0) {
@@ -83017,6 +83130,7 @@ const hostsModes = [
     }
     return steps.length > 0;
 }
+
 
 
 
@@ -144190,6 +144304,14 @@ const artifact_client = new DefaultArtifactClient();
 
 
 
+
+/**
+ * The logs folder of `lane`. One folder per lane keeps two projects in one job from overwriting
+ * each other's `unit-api.log`, and lets `start` name the folder a later `stop` writes into.
+ */ function laneLogsDir(env, lane) {
+    const name = (lane || 'lane').replace(/[^A-Za-z0-9._-]/g, '_');
+    return join(env.RUNNER_TEMP ?? tmpdir(), 'devlanes-logs', name);
+}
 /** Whether logs are uploaded for this outcome. */ function shouldUpload(mode, failed) {
     return mode === 'always' || mode === 'on-failure' && failed;
 }
@@ -144346,6 +144468,12 @@ const state_key = 'devlanes';
     return raw ? JSON.parse(raw) : null;
 }
 /** Set in `$GITHUB_ENV` once a job has a configured daemon, so later uses skip setup. */ const readyVariable = 'DEVLANES_ACTION_READY';
-/** Set in `$GITHUB_ENV` after `command: stop`, so post steps do not stop the lane again. */ const stoppedVariable = 'DEVLANES_ACTION_STOPPED';
+/**
+ * Set in `$GITHUB_ENV` by `command: stop` to the lanes it stopped, one per line, so the post
+ * steps of earlier uses skip those lanes and still stop any other.
+ */ const stoppedVariable = 'DEVLANES_ACTION_STOPPED';
+/** Lanes a `command: stop` already stopped in this job. */ function stoppedLanes(env) {
+    return (env[stoppedVariable] ?? '').split('\n').filter(Boolean);
+}
 
-export { addHosts, addPath, childEnv, cli, core_debug, core_group, core_info, core_warning, defaultArtifactName, exec_exec, exportVariable, failedUnits, getInput, hostsPath, httpsPort, infraOutputs, io_cp, isDebug, jobFailed, laneHostnames, lib_HttpClient, loadState, mkdirP, parseJson, readInputs, readyVariable, removeHosts, resolvesToLoopback, rmRF, serviceOutputs, setFailed, setOutput, shouldUpload, state_saveState, stoppedVariable, uploadLogs, urlOutputs, which, writeDiagnostics };
+export { addHosts, addPath, childEnv, cli, core_debug, core_group, core_info, core_warning, defaultArtifactName, exec_exec, exportVariable, failedUnits, getInput, hostsPath, httpsPort, infraOutputs, io_cp, isDebug, jobFailed, laneHostnames, laneLogsDir, lib_HttpClient, loadState, mkdirP, parseJson, readInputs, readyVariable, removeHosts, resolvesToLoopback, rmRF, serviceOutputs, setFailed, setOutput, shouldUpload, state_saveState, stoppedLanes, stoppedVariable, uploadLogs, urlOutputs, which, writeDiagnostics };

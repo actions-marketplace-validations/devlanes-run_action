@@ -19,7 +19,9 @@ export interface RunOptions {
 
 /** The devlanes CLI as the rest of the action uses it; tests replace it with a fake. */
 export interface Devlanes {
+  /** Runs `devlanes <args>` and resolves with how it ended, whatever the exit code. */
   run(args: string[], options?: RunOptions): Promise<RunResult>;
+  /** Runs `devlanes <args> --json` and returns its last JSON document. */
   json<T>(args: string[], options?: RunOptions): Promise<T>;
 }
 
@@ -57,8 +59,10 @@ export function parseJson<T>(stdout: string, args: string[]): T {
 }
 
 /**
- * Starts `bin` and resolves with its exit status. A signal sent to the action (a cancelled
- * job) is passed on, so `devlanes with` can stop what it started before the runner kills it.
+ * Starts `bin` and resolves with its exit status. On Linux and macOS a signal sent to the action
+ * (a cancelled job) is passed on, so `devlanes with` can stop what it started before the runner
+ * kills it. Windows delivers the runner's Ctrl-C to every process on the console already, and
+ * `child.kill` there would end devlanes at once instead.
  */
 export function spawnProcess(
   bin: string,
@@ -83,7 +87,10 @@ export function spawnProcess(
       stderr += chunk;
     });
 
-    const forward = (signal: NodeJS.Signals) => child.kill(signal);
+    // A listener also keeps Node from exiting on the signal before devlanes has finished.
+    const forward = (signal: NodeJS.Signals) => {
+      if (process.platform !== 'win32') child.kill(signal);
+    };
     process.on('SIGINT', forward);
     process.on('SIGTERM', forward);
     const settle = () => {

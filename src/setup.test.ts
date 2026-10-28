@@ -25,8 +25,15 @@ test('the config input becomes dotted settings', () => {
   assert.deepEqual(changes, [
     { key: 'proxy.https_port', value: '9443' },
     { key: 'tls.trust', value: '["system","chrome"]' },
-    { key: 'lanes.freeze_after', value: '30m' },
+    { key: 'lanes.freeze_after', value: '"30m"' },
     { key: 'lanes.data_dir', value: null }
+  ]);
+  // Strings stay strings when devlanes reads them back as YAML.
+  assert.deepEqual(flattenConfig("a: 'true'\nb: '*.x'\nc: '-v'\nd: 'x # y'\n"), [
+    { key: 'a', value: '"true"' },
+    { key: 'b', value: '"*.x"' },
+    { key: 'c', value: '"-v"' },
+    { key: 'd', value: '"x # y"' }
   ]);
   assert.deepEqual(flattenConfig('  \n'), []);
   assert.throws(() => flattenConfig('- a\n- b\n'), /must be a YAML mapping/);

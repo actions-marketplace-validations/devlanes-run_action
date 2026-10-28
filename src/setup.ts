@@ -1,5 +1,5 @@
-// Prepares the runner before the daemon starts: user config, the proxy's ports and, on Linux,
-// trust in the devlanes CA. The daemon reads all of these only when it starts.
+// Prepares the runner before the daemon starts: user config and the proxy's ports, which the
+// daemon reads only when it starts, and on Linux trust in the devlanes CA.
 
 import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
@@ -28,8 +28,9 @@ export interface ConfigChange {
 }
 
 /**
- * The `config` input as dotted settings. Mappings become dotted keys; lists and scalars are
- * values that `devlanes config set` reads as YAML, so it validates them as the CLI does.
+ * The `config` input as dotted settings. Mappings become dotted keys; lists and scalars become
+ * JSON, which `devlanes config set` reads as YAML: a string stays a string even when it looks
+ * like `true`, a number, a `*` alias or a `# comment`, and a value never starts with `-`.
  */
 export function flattenConfig(text: string): ConfigChange[] {
   if (!text.trim()) return [];
@@ -43,9 +44,7 @@ export function flattenConfig(text: string): ConfigChange[] {
       return;
     }
     const key = path.join('.');
-    if (value === null) changes.push({ key, value: null });
-    else if (typeof value === 'string') changes.push({ key, value });
-    else changes.push({ key, value: JSON.stringify(value) });
+    changes.push({ key, value: value === null ? null : JSON.stringify(value) });
   };
   visit(document, []);
   return changes;
@@ -78,6 +77,15 @@ export function succeeds(command: string, args: string[]): Promise<boolean> {
   });
 }
 
+/** Whether `command` is on PATH: it starts at all, whatever it exits with. */
+export function exists(command: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn(command, [], { stdio: 'ignore' });
+    child.on('error', () => resolve(false));
+    child.on('close', () => resolve(true));
+  });
+}
+
 /** Lets unprivileged processes bind 80 and 443 so public URLs carry no port. Linux only. */
 export async function allowLowPorts(): Promise<void> {
   if (!(await succeeds('sudo', ['-n', 'true']))) {
@@ -103,10 +111,11 @@ export async function allowLowPorts(): Promise<void> {
 
 /**
  * Makes sure `certutil` exists, so `tls.trust: chrome` can reach the NSS store that Chromium
- * and Playwright's browsers read. Returns false when it is missing and cannot be installed.
+ * reads. Returns false when it is missing and cannot be installed.
  */
 export async function ensureCertutil(): Promise<boolean> {
-  if (await succeeds('certutil', ['-H'])) return true;
+  // certutil prints its usage and exits 1 without arguments, so only a failed spawn means missing.
+  if (await exists('certutil')) return true;
   if (!(await succeeds('sudo', ['-n', 'true'])) || !(await succeeds('apt-get', ['--version']))) {
     return false;
   }
@@ -117,16 +126,25 @@ export async function ensureCertutil(): Promise<boolean> {
   return succeeds('sudo', install);
 }
 
-/** Trusts the devlanes CA on Linux through `devlanes certs trust`; problems become warnings. */
-export async function trustLinux(devlanes: Devlanes, hostsFile: boolean): Promise<void> {
-  const trustBrowsers = await ensureCertutil();
-  await applyConfig(devlanes, [
-    { key: 'tls.trust', value: trustBrowsers ? '[system, chrome]' : '[system]' }
-  ]);
-  if (!trustBrowsers) {
-    core.warning(
-      'certutil is missing and could not be installed; Chromium and Playwright will not trust the devlanes CA'
-    );
+/**
+ * Trusts the devlanes CA on Linux through `devlanes certs trust`; problems become warnings.
+ * `stores` false keeps a `tls.trust` the workflow set through the `config` input.
+ */
+export async function trustLinux(
+  devlanes: Devlanes,
+  hostsFile: boolean,
+  stores: boolean
+): Promise<void> {
+  if (stores) {
+    const trustBrowsers = await ensureCertutil();
+    await applyConfig(devlanes, [
+      { key: 'tls.trust', value: trustBrowsers ? '[system, chrome]' : '[system]' }
+    ]);
+    if (!trustBrowsers) {
+      core.warning(
+        'certutil is missing and could not be installed; Chromium will not trust the devlanes CA'
+      );
+    }
   }
 
   const args = hostsFile ? ['certs', 'trust', '--hosts'] : ['certs', 'trust'];

@@ -7,7 +7,7 @@ import "child_process";
 import { ok as external_assert_ok } from "assert";
 import { spawn } from "node:child_process";
 import { __webpack_require__ } from "./rslib-runtime.js";
-import { cli, getInput, shouldUpload, stoppedVariable, urlOutputs, mkdirP, io_cp, readInputs, resolvesToLoopback, serviceOutputs, rmRF, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, defaultArtifactName, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./q.js";
+import { cli, getInput, shouldUpload, stoppedVariable, urlOutputs, mkdirP, io_cp, readInputs, resolvesToLoopback, serviceOutputs, rmRF, stoppedLanes, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, laneLogsDir, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, defaultArtifactName, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./q.js";
 
 import { createRequire as __rspack_createRequire } from "node:module";
 const __rspack_createRequire_require = __rspack_createRequire(import.meta.url);
@@ -11988,8 +11988,8 @@ const releasesUrl = 'https://github.com/devlanes-run/devlanes/releases';
 
 
 const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/yaml/dist/index.js");
-// Prepares the runner before the daemon starts: user config, the proxy's ports and, on Linux,
-// trust in the devlanes CA. The daemon reads all of these only when it starts.
+// Prepares the runner before the daemon starts: user config and the proxy's ports, which the
+// daemon reads only when it starts, and on Linux trust in the devlanes CA.
 
 
 
@@ -12017,8 +12017,9 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     ]
 ];
 /**
- * The `config` input as dotted settings. Mappings become dotted keys; lists and scalars are
- * values that `devlanes config set` reads as YAML, so it validates them as the CLI does.
+ * The `config` input as dotted settings. Mappings become dotted keys; lists and scalars become
+ * JSON, which `devlanes config set` reads as YAML: a string stays a string even when it looks
+ * like `true`, a number, a `*` alias or a `# comment`, and a value never starts with `-`.
  */ function flattenConfig(text) {
     if (!text.trim()) return [];
     const document = (0,dist.qg)(text);
@@ -12033,17 +12034,9 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
             return;
         }
         const key = path.join('.');
-        if (value === null) changes.push({
+        changes.push({
             key,
-            value: null
-        });
-        else if (typeof value === 'string') changes.push({
-            key,
-            value
-        });
-        else changes.push({
-            key,
-            value: JSON.stringify(value)
+            value: value === null ? null : JSON.stringify(value)
         });
     };
     visit(document, []);
@@ -12079,6 +12072,15 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
         child.on('close', (code)=>resolve(code === 0));
     });
 }
+/** Whether `command` is on PATH: it starts at all, whatever it exits with. */ function exists(command) {
+    return new Promise((resolve)=>{
+        const child = spawn(command, [], {
+            stdio: 'ignore'
+        });
+        child.on('error', ()=>resolve(false));
+        child.on('close', ()=>resolve(true));
+    });
+}
 /** Lets unprivileged processes bind 80 and 443 so public URLs carry no port. Linux only. */ async function allowLowPorts() {
     if (!await succeeds('sudo', [
         '-n',
@@ -12099,11 +12101,10 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
 }
 /**
  * Makes sure `certutil` exists, so `tls.trust: chrome` can reach the NSS store that Chromium
- * and Playwright's browsers read. Returns false when it is missing and cannot be installed.
+ * reads. Returns false when it is missing and cannot be installed.
  */ async function ensureCertutil() {
-    if (await succeeds('certutil', [
-        '-H'
-    ])) return true;
+    // certutil prints its usage and exits 1 without arguments, so only a failed spawn means missing.
+    if (await exists('certutil')) return true;
     if (!await succeeds('sudo', [
         '-n',
         'true'
@@ -12130,16 +12131,21 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     ]);
     return succeeds('sudo', install);
 }
-/** Trusts the devlanes CA on Linux through `devlanes certs trust`; problems become warnings. */ async function trustLinux(devlanes, hostsFile) {
-    const trustBrowsers = await ensureCertutil();
-    await applyConfig(devlanes, [
-        {
-            key: 'tls.trust',
-            value: trustBrowsers ? '[system, chrome]' : '[system]'
+/**
+ * Trusts the devlanes CA on Linux through `devlanes certs trust`; problems become warnings.
+ * `stores` false keeps a `tls.trust` the workflow set through the `config` input.
+ */ async function trustLinux(devlanes, hostsFile, stores) {
+    if (stores) {
+        const trustBrowsers = await ensureCertutil();
+        await applyConfig(devlanes, [
+            {
+                key: 'tls.trust',
+                value: trustBrowsers ? '[system, chrome]' : '[system]'
+            }
+        ]);
+        if (!trustBrowsers) {
+            core_warning('certutil is missing and could not be installed; Chromium will not trust the devlanes CA');
         }
-    ]);
-    if (!trustBrowsers) {
-        core_warning('certutil is missing and could not be installed; Chromium and Playwright will not trust the devlanes CA');
     }
     const args = hostsFile ? [
         'certs',
@@ -12280,36 +12286,47 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
 /** Runs the main step. */ async function main() {
     const inputs = readInputs((name)=>getInput(name), process.platform);
     const installed = await core_group(`Install devlanes ${inputs.version}`, ()=>install_install(inputs.version));
+    const workspace = process.env.GITHUB_WORKSPACE ?? process.cwd();
+    // devlanes reads DEVLANES_HOME relative to each process's directory, and the action runs
+    // devlanes from more than one, so a relative input is made absolute once here.
+    const home = inputs.home ? external_node_path_resolve(workspace, inputs.home) : '';
     // Later `run: devlanes ...` steps must reach the same daemon, which is keyed by the home.
-    if (inputs.home) exportVariable('DEVLANES_HOME', inputs.home);
-    const cwd = external_node_path_resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), inputs.workingDirectory);
-    const logsDir = join(process.env.RUNNER_TEMP ?? tmpdir(), 'devlanes-logs');
-    const devlanes = ()=>cli(installed.bin, childEnv(process.env, inputs.home));
+    if (home) exportVariable('DEVLANES_HOME', home);
+    const cwd = external_node_path_resolve(workspace, inputs.workingDirectory);
+    const devlanes = ()=>cli(installed.bin, childEnv(process.env, home));
     const printed = (await devlanes().run([
         '--version'
     ])).stdout.trim();
     setOutput('version', printed.replace(/^devlanes\s+/, '') || installed.version);
-    setOutput('logs-dir', logsDir);
     if (inputs.command === 'stop') {
-        await stop(devlanes(), inputs, cwd, logsDir);
+        await stop(devlanes(), inputs, cwd);
         return;
     }
     const daemonStarted = await prepare(devlanes(), inputs);
-    const status = await daemonStatus(devlanes());
-    const home = status.home ?? (inputs.home || join(homedir(), '.devlanes'));
+    // Saved before anything else can fail, so the post step always stops a daemon started here.
     const state = {
         bin: installed.bin,
-        home,
+        home: home || process.env.DEVLANES_HOME || join(homedir(), '.devlanes'),
         cwd,
-        logsDir,
+        logsDir: '',
         lane: '',
         daemonStarted,
-        hostsWritten: false,
+        hostsLane: '',
+        withDone: false,
         failed: false
     };
     state_saveState(state);
-    setOutput('home', home);
-    const ca = caFiles(home);
+    state.home = (await daemonStatus(devlanes())).home ?? state.home;
+    state_saveState(state);
+    setOutput('home', state.home);
+    // The lane exists before it starts, so its CA, logs folder and hostnames are known up front.
+    const laneEnv = inputs.command === 'install' ? null : await currentLane(devlanes(), cwd);
+    // The lane names the CA files, which differ from the home's with `tls.ca: mkcert`.
+    const fallback = caFiles(state.home);
+    const ca = {
+        cert: laneEnv?.env.DEVLANES_CA_CERT ?? fallback.cert,
+        bundle: laneEnv?.env.DEVLANES_CA_BUNDLE ?? fallback.bundle
+    };
     setOutput('ca-cert', ca.cert);
     setOutput('ca-bundle', ca.bundle);
     if (inputs.exportCa) {
@@ -12319,8 +12336,17 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
         }
     }
     if (inputs.command === 'install') return;
-    state.hostsWritten = await windowsHosts(devlanes(), inputs, cwd);
+    if (laneEnv) {
+        state.lane = laneEnv.lane;
+        setOutput('lane', laneEnv.lane);
+    }
+    state.logsDir = laneLogsDir(process.env, state.lane);
+    setOutput('logs-dir', state.logsDir);
     state_saveState(state);
+    if (state.lane && await laneHosts(devlanes(), inputs, state.lane, cwd)) {
+        state.hostsLane = state.lane;
+        state_saveState(state);
+    }
     if (inputs.command === 'start') await start(devlanes(), inputs, state);
     else await withCommand(devlanes(), inputs, state);
 }
@@ -12329,38 +12355,38 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
  * the daemon, which makes its post step the one that stops it.
  */ async function prepare(devlanes, inputs) {
     const before = await daemonStatus(devlanes);
-    if (process.env[readyVariable] && before.running) return false;
+    if (process.env[readyVariable] && before.running) {
+        core_info('devlanes is already set up in this job; config, trust, low-ports and hosts-file: true apply only to the first use of the action');
+        return false;
+    }
     if (before.running) {
         core_warning('A devlanes daemon was already running; config, low-ports and trust apply after `devlanes daemon restart`');
     }
     const daemonStarted = await core_group('Set up devlanes', async ()=>{
+        const own = flattenConfig(inputs.config);
+        // The workflow's settings go last, so they win over the action's.
         await applyConfig(devlanes, ciConfig.map(([key, value])=>({
                 key,
                 value
             })));
-        await applyConfig(devlanes, flattenConfig(inputs.config));
+        await applyConfig(devlanes, own);
         const helper = inputs.hostsFile === 'true';
         if (process.platform === 'linux') {
             if (inputs.lowPorts) await allowLowPorts();
-            if (inputs.trust || helper) await trustLinux(devlanes, helper);
-        } else {
-            if (inputs.trust) core_warning(trustSkippedWarning(process.platform));
-            if (helper && process.platform === 'darwin') {
-                core_warning('hosts-file: true has no effect on macOS runners, which resolve *.localhost');
-            }
+            const stores = !own.some((change)=>change.key === 'tls.trust');
+            if (inputs.trust || helper) await trustLinux(devlanes, helper, stores);
+        } else if (inputs.trust) {
+            core_warning(trustSkippedWarning(process.platform));
         }
-        let started = false;
-        if (!before.running) {
-            const result = await devlanes.run([
-                'daemon',
-                'start'
-            ], {
-                stream: true
-            });
-            if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
-            started = true;
-        }
-        return started;
+        if (before.running) return false;
+        const result = await devlanes.run([
+            'daemon',
+            'start'
+        ], {
+            stream: true
+        });
+        if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
+        return true;
     });
     // After the daemon starts, so it reports the proxy's ports and the hostname lookup it tried.
     await core_group('devlanes doctor', async ()=>{
@@ -12374,21 +12400,20 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     return daemonStarted;
 }
 /**
- * Adds the lane's hostnames to the Windows hosts file when they do not resolve, before anything
- * calls them. Returns whether the file was changed, so the post step can undo it.
- */ async function windowsHosts(devlanes, inputs, cwd) {
-    if (process.platform !== 'win32' || inputs.hostsFile === 'false') return false;
-    const laneEnv = await currentLane(devlanes, cwd);
-    if (!laneEnv) return false;
-    const hosts = laneHostnames(await laneStatus(devlanes, laneEnv.lane, cwd));
+ * Adds the lane's hostnames to the hosts file on Windows and macOS when they do not resolve,
+ * before anything calls them. Returns whether the file was changed, so the post step undoes it.
+ */ async function laneHosts(devlanes, inputs, lane, cwd) {
+    const platform = process.platform;
+    if (platform === 'linux' || inputs.hostsFile === 'false') return false;
+    const hosts = laneHostnames(await laneStatus(devlanes, lane, cwd));
     if (hosts.length === 0) return false;
     if (inputs.hostsFile === 'auto' && await resolvesToLoopback(hosts[0] ?? '')) return false;
     try {
-        await addHosts(hostsPath(process.env), hosts);
+        await addHosts(platform, hostsPath(platform, process.env), lane, hosts);
         core_info(`Added ${hosts.join(', ')} to the hosts file`);
         return true;
     } catch (error) {
-        core_warning(`Could not add the lane's hostnames to the hosts file, which needs an elevated runner: ${message(error)}`);
+        core_warning(`Could not add the lane's hostnames to the hosts file, which needs an elevated runner on Windows and passwordless sudo on macOS: ${message(error)}`);
         return false;
     }
 }
@@ -12443,14 +12468,13 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     });
     const laneEnv = await currentLane(devlanes, state.cwd);
     if (laneEnv) {
-        state.lane = laneEnv.lane;
-        state_saveState(state);
-        setOutput('lane', laneEnv.lane);
         setOutput('env', JSON.stringify(laneEnv.env));
         if (inputs.exportEnv) {
             for (const [name, value] of Object.entries(laneEnv.env))exportVariable(name, value);
         }
-        const lane = await laneStatus(devlanes, laneEnv.lane, state.cwd);
+    }
+    if (state.lane) {
+        const lane = await laneStatus(devlanes, state.lane, state.cwd);
         if (lane) {
             const services = serviceOutputs(lane);
             setOutput('lane-index', lane.index === null ? '' : String(lane.index));
@@ -12479,9 +12503,13 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
 }
 /** `command: with`: start the lane, run the script against it and stop what was started. */ async function withCommand(devlanes, inputs, state) {
     const argv = await writeScript(inputs.shell, inputs.run, process.env.RUNNER_TEMP ?? tmpdir(), process.platform);
+    const keep = inputs.cleanup === 'keep' ? [
+        '--keep'
+    ] : [];
     const result = await devlanes.run([
         'with',
         ...startFlags(inputs),
+        ...keep,
         '--logs-dir',
         state.logsDir,
         ...inputs.units,
@@ -12492,21 +12520,19 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
         stream: true
     });
     setOutput('exit-code', String(result.code));
-    const laneEnv = await currentLane(devlanes, state.cwd);
-    if (laneEnv) {
-        state.lane = laneEnv.lane;
-        setOutput('lane', laneEnv.lane);
-    }
+    state.withDone = true;
     if (result.code !== 0) {
         state.failed = true;
         setFailed(`devlanes with exited ${result.code}`);
     }
     state_saveState(state);
 }
-/** `command: stop`: stop the lane now, write its logs and upload them. */ async function stop(devlanes, inputs, cwd, logsDir) {
+/** `command: stop`: stop the lane now, write its logs and upload them. */ async function stop(devlanes, inputs, cwd) {
     const laneEnv = await currentLane(devlanes, cwd);
     if (!laneEnv) throw new Error(`No devlanes lane in ${cwd} to stop`);
+    const logsDir = laneLogsDir(process.env, laneEnv.lane);
     setOutput('lane', laneEnv.lane);
+    setOutput('logs-dir', logsDir);
     const lane = await laneStatus(devlanes, laneEnv.lane, cwd);
     const result = await devlanes.run([
         'stop',
@@ -12527,7 +12553,11 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     if (shouldUpload(inputs.uploadLogs, failed)) {
         await uploadLogs(logsDir, inputs.artifactName || defaultArtifactName(process.env), inputs.retentionDays);
     }
-    exportVariable(stoppedVariable, '1');
+    const stopped = [
+        ...stoppedLanes(process.env),
+        laneEnv.lane
+    ];
+    exportVariable(stoppedVariable, stopped.join('\n'));
     if (result.code !== 0) setFailed(`devlanes stop exited ${result.code}`);
 }
 /** The text of an error. */ function message(error) {

@@ -3,12 +3,22 @@
 
 import { readdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DefaultArtifactClient } from '@actions/artifact';
 import * as core from '@actions/core';
 import type { Devlanes } from './devlanes.ts';
 import type { UploadMode } from './inputs.ts';
 import type { LaneSummary } from './outputs.ts';
+
+/**
+ * The logs folder of `lane`. One folder per lane keeps two projects in one job from overwriting
+ * each other's `unit-api.log`, and lets `start` name the folder a later `stop` writes into.
+ */
+export function laneLogsDir(env: NodeJS.ProcessEnv, lane: string): string {
+  const name = (lane || 'lane').replace(/[^A-Za-z0-9._-]/g, '_');
+  return join(env.RUNNER_TEMP ?? tmpdir(), 'devlanes-logs', name);
+}
 
 /** Whether logs are uploaded for this outcome. */
 export function shouldUpload(mode: UploadMode, failed: boolean): boolean {

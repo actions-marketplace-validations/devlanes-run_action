@@ -11,7 +11,13 @@ import { addHosts, hostsPath, laneHostnames, resolvesToLoopback } from './hosts.
 import { type Inputs, readInputs } from './inputs.ts';
 import { install } from './install.ts';
 import { jobFailed } from './job.ts';
-import { defaultArtifactName, shouldUpload, uploadLogs, writeDiagnostics } from './logs.ts';
+import {
+  defaultArtifactName,
+  laneLogsDir,
+  shouldUpload,
+  uploadLogs,
+  writeDiagnostics
+} from './logs.ts';
 import {
   failedUnits,
   type HostsPage,
@@ -33,7 +39,7 @@ import {
   trustSkippedWarning
 } from './setup.ts';
 import { writeScript } from './shell.ts';
-import { readyVariable, type State, saveState, stoppedVariable } from './state.ts';
+import { readyVariable, type State, saveState, stoppedLanes, stoppedVariable } from './state.ts';
 
 /** Runs the main step. */
 async function main(): Promise<void> {
@@ -42,38 +48,51 @@ async function main(): Promise<void> {
     install(inputs.version)
   );
 
+  const workspace = process.env.GITHUB_WORKSPACE ?? process.cwd();
+  // devlanes reads DEVLANES_HOME relative to each process's directory, and the action runs
+  // devlanes from more than one, so a relative input is made absolute once here.
+  const home = inputs.home ? resolve(workspace, inputs.home) : '';
   // Later `run: devlanes ...` steps must reach the same daemon, which is keyed by the home.
-  if (inputs.home) core.exportVariable('DEVLANES_HOME', inputs.home);
-  const cwd = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd(), inputs.workingDirectory);
-  const logsDir = join(process.env.RUNNER_TEMP ?? tmpdir(), 'devlanes-logs');
-  const devlanes = () => cli(installed.bin, childEnv(process.env, inputs.home));
+  if (home) core.exportVariable('DEVLANES_HOME', home);
+  const cwd = resolve(workspace, inputs.workingDirectory);
+  const devlanes = () => cli(installed.bin, childEnv(process.env, home));
 
   const printed = (await devlanes().run(['--version'])).stdout.trim();
   core.setOutput('version', printed.replace(/^devlanes\s+/, '') || installed.version);
-  core.setOutput('logs-dir', logsDir);
 
   if (inputs.command === 'stop') {
-    await stop(devlanes(), inputs, cwd, logsDir);
+    await stop(devlanes(), inputs, cwd);
     return;
   }
 
   const daemonStarted = await prepare(devlanes(), inputs);
-  const status = await daemonStatus(devlanes());
-  const home = status.home ?? (inputs.home || join(homedir(), '.devlanes'));
+  // Saved before anything else can fail, so the post step always stops a daemon started here.
   const state: State = {
     bin: installed.bin,
-    home,
+    home: home || process.env.DEVLANES_HOME || join(homedir(), '.devlanes'),
     cwd,
-    logsDir,
+    logsDir: '',
     lane: '',
     daemonStarted,
-    hostsWritten: false,
+    hostsLane: '',
+    withDone: false,
     failed: false
   };
   saveState(state);
-  core.setOutput('home', home);
 
-  const ca = caFiles(home);
+  state.home = (await daemonStatus(devlanes())).home ?? state.home;
+  saveState(state);
+  core.setOutput('home', state.home);
+
+  // The lane exists before it starts, so its CA, logs folder and hostnames are known up front.
+  const laneEnv = inputs.command === 'install' ? null : await currentLane(devlanes(), cwd);
+
+  // The lane names the CA files, which differ from the home's with `tls.ca: mkcert`.
+  const fallback = caFiles(state.home);
+  const ca = {
+    cert: laneEnv?.env.DEVLANES_CA_CERT ?? fallback.cert,
+    bundle: laneEnv?.env.DEVLANES_CA_BUNDLE ?? fallback.bundle
+  };
   core.setOutput('ca-cert', ca.cert);
   core.setOutput('ca-bundle', ca.bundle);
   if (inputs.exportCa) {
@@ -82,10 +101,21 @@ async function main(): Promise<void> {
       core.exportVariable(name, value);
     }
   }
-
   if (inputs.command === 'install') return;
-  state.hostsWritten = await windowsHosts(devlanes(), inputs, cwd);
+
+  if (laneEnv) {
+    state.lane = laneEnv.lane;
+    core.setOutput('lane', laneEnv.lane);
+  }
+  state.logsDir = laneLogsDir(process.env, state.lane);
+  core.setOutput('logs-dir', state.logsDir);
   saveState(state);
+
+  if (state.lane && (await laneHosts(devlanes(), inputs, state.lane, cwd))) {
+    state.hostsLane = state.lane;
+    saveState(state);
+  }
+
   if (inputs.command === 'start') await start(devlanes(), inputs, state);
   else await withCommand(devlanes(), inputs, state);
 }
@@ -96,7 +126,12 @@ async function main(): Promise<void> {
  */
 async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
   const before = await daemonStatus(devlanes);
-  if (process.env[readyVariable] && before.running) return false;
+  if (process.env[readyVariable] && before.running) {
+    core.info(
+      'devlanes is already set up in this job; config, trust, low-ports and hosts-file: true apply only to the first use of the action'
+    );
+    return false;
+  }
   if (before.running) {
     core.warning(
       'A devlanes daemon was already running; config, low-ports and trust apply after `devlanes daemon restart`'
@@ -104,30 +139,27 @@ async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
   }
 
   const daemonStarted = await core.group('Set up devlanes', async () => {
+    const own = flattenConfig(inputs.config);
+    // The workflow's settings go last, so they win over the action's.
     await applyConfig(
       devlanes,
       ciConfig.map(([key, value]) => ({ key, value }))
     );
-    await applyConfig(devlanes, flattenConfig(inputs.config));
+    await applyConfig(devlanes, own);
 
     const helper = inputs.hostsFile === 'true';
     if (process.platform === 'linux') {
       if (inputs.lowPorts) await allowLowPorts();
-      if (inputs.trust || helper) await trustLinux(devlanes, helper);
-    } else {
-      if (inputs.trust) core.warning(trustSkippedWarning(process.platform));
-      if (helper && process.platform === 'darwin') {
-        core.warning('hosts-file: true has no effect on macOS runners, which resolve *.localhost');
-      }
+      const stores = !own.some((change) => change.key === 'tls.trust');
+      if (inputs.trust || helper) await trustLinux(devlanes, helper, stores);
+    } else if (inputs.trust) {
+      core.warning(trustSkippedWarning(process.platform));
     }
 
-    let started = false;
-    if (!before.running) {
-      const result = await devlanes.run(['daemon', 'start'], { stream: true });
-      if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
-      started = true;
-    }
-    return started;
+    if (before.running) return false;
+    const result = await devlanes.run(['daemon', 'start'], { stream: true });
+    if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
+    return true;
   });
 
   // After the daemon starts, so it reports the proxy's ports and the hostname lookup it tried.
@@ -139,24 +171,28 @@ async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
 }
 
 /**
- * Adds the lane's hostnames to the Windows hosts file when they do not resolve, before anything
- * calls them. Returns whether the file was changed, so the post step can undo it.
+ * Adds the lane's hostnames to the hosts file on Windows and macOS when they do not resolve,
+ * before anything calls them. Returns whether the file was changed, so the post step undoes it.
  */
-async function windowsHosts(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<boolean> {
-  if (process.platform !== 'win32' || inputs.hostsFile === 'false') return false;
-  const laneEnv = await currentLane(devlanes, cwd);
-  if (!laneEnv) return false;
-  const hosts = laneHostnames(await laneStatus(devlanes, laneEnv.lane, cwd));
+async function laneHosts(
+  devlanes: Devlanes,
+  inputs: Inputs,
+  lane: string,
+  cwd: string
+): Promise<boolean> {
+  const platform = process.platform;
+  if (platform === 'linux' || inputs.hostsFile === 'false') return false;
+  const hosts = laneHostnames(await laneStatus(devlanes, lane, cwd));
   if (hosts.length === 0) return false;
   if (inputs.hostsFile === 'auto' && (await resolvesToLoopback(hosts[0] ?? ''))) return false;
 
   try {
-    await addHosts(hostsPath(process.env), hosts);
+    await addHosts(platform, hostsPath(platform, process.env), lane, hosts);
     core.info(`Added ${hosts.join(', ')} to the hosts file`);
     return true;
   } catch (error) {
     core.warning(
-      `Could not add the lane's hostnames to the hosts file, which needs an elevated runner: ${message(error)}`
+      `Could not add the lane's hostnames to the hosts file, which needs an elevated runner on Windows and passwordless sudo on macOS: ${message(error)}`
     );
     return false;
   }
@@ -204,15 +240,13 @@ async function start(devlanes: Devlanes, inputs: Inputs, state: State): Promise<
 
   const laneEnv = await currentLane(devlanes, state.cwd);
   if (laneEnv) {
-    state.lane = laneEnv.lane;
-    saveState(state);
-    core.setOutput('lane', laneEnv.lane);
     core.setOutput('env', JSON.stringify(laneEnv.env));
     if (inputs.exportEnv) {
       for (const [name, value] of Object.entries(laneEnv.env)) core.exportVariable(name, value);
     }
-
-    const lane = await laneStatus(devlanes, laneEnv.lane, state.cwd);
+  }
+  if (state.lane) {
+    const lane = await laneStatus(devlanes, state.lane, state.cwd);
     if (lane) {
       const services = serviceOutputs(lane);
       core.setOutput('lane-index', lane.index === null ? '' : String(lane.index));
@@ -244,17 +278,22 @@ async function withCommand(devlanes: Devlanes, inputs: Inputs, state: State): Pr
     process.env.RUNNER_TEMP ?? tmpdir(),
     process.platform
   );
+  const keep = inputs.cleanup === 'keep' ? ['--keep'] : [];
   const result = await devlanes.run(
-    ['with', ...startFlags(inputs), '--logs-dir', state.logsDir, ...inputs.units, '--', ...argv],
+    [
+      'with',
+      ...startFlags(inputs),
+      ...keep,
+      '--logs-dir',
+      state.logsDir,
+      ...inputs.units,
+      '--',
+      ...argv
+    ],
     { cwd: state.cwd, stream: true }
   );
   core.setOutput('exit-code', String(result.code));
-
-  const laneEnv = await currentLane(devlanes, state.cwd);
-  if (laneEnv) {
-    state.lane = laneEnv.lane;
-    core.setOutput('lane', laneEnv.lane);
-  }
+  state.withDone = true;
   if (result.code !== 0) {
     state.failed = true;
     core.setFailed(`devlanes with exited ${result.code}`);
@@ -263,15 +302,12 @@ async function withCommand(devlanes: Devlanes, inputs: Inputs, state: State): Pr
 }
 
 /** `command: stop`: stop the lane now, write its logs and upload them. */
-async function stop(
-  devlanes: Devlanes,
-  inputs: Inputs,
-  cwd: string,
-  logsDir: string
-): Promise<void> {
+async function stop(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<void> {
   const laneEnv = await currentLane(devlanes, cwd);
   if (!laneEnv) throw new Error(`No devlanes lane in ${cwd} to stop`);
+  const logsDir = laneLogsDir(process.env, laneEnv.lane);
   core.setOutput('lane', laneEnv.lane);
+  core.setOutput('logs-dir', logsDir);
 
   const lane = await laneStatus(devlanes, laneEnv.lane, cwd);
   const result = await devlanes.run(['stop', '--lane', laneEnv.lane, '--logs-dir', logsDir], {
@@ -292,7 +328,8 @@ async function stop(
       inputs.retentionDays
     );
   }
-  core.exportVariable(stoppedVariable, '1');
+  const stopped = [...stoppedLanes(process.env), laneEnv.lane];
+  core.exportVariable(stoppedVariable, stopped.join('\n'));
   if (result.code !== 0) core.setFailed(`devlanes stop exited ${result.code}`);
 }
 

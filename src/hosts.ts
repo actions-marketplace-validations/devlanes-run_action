@@ -1,17 +1,17 @@
-// Hosts file entries for the lane's hostnames on Windows runners. Windows 11 answers *.localhost
-// with loopback by itself, but Windows Server 2025 (windows-latest) does not, and devlanes never
-// writes the hosts file on Windows. Runners are elevated, so the action can.
+// Hosts file entries for the lane's hostnames on runners whose resolver does not answer
+// *.localhost: Windows Server 2025 (windows-latest) and macOS before 26. Linux runners resolve
+// those names, and devlanes' own helper covers programs that skip the resolver there. Windows
+// runners are elevated and macOS runners have passwordless sudo, so the action can write the file.
 
+import { spawn } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LaneSummary } from './outputs.ts';
 
-const begin = '# devlanes action begin';
-const end = '# devlanes action end';
-
-/** The Windows hosts file. */
-export function hostsPath(env: NodeJS.ProcessEnv): string {
+/** The hosts file of `platform`. */
+export function hostsPath(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string {
+  if (platform !== 'win32') return '/etc/hosts';
   return join(env.SystemRoot ?? 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts');
 }
 
@@ -24,24 +24,41 @@ export function laneHostnames(lane: LaneSummary | undefined): string[] {
   const hosts = new Set<string>();
   for (const url of urls) {
     if (!url.startsWith('https://')) continue;
-    const { hostname } = new URL(url);
+    let hostname: string;
+    try {
+      hostname = new URL(url).hostname;
+    } catch {
+      // A URL the daemon printed but URL cannot parse has no name worth writing.
+      continue;
+    }
     // A hosts file takes only exact names; wildcards need devlanes' resolver strategy.
     if (!hostname.includes('*')) hosts.add(hostname);
   }
   return [...hosts].sort();
 }
 
-/** `text` without the action's block. */
-export function withoutBlock(text: string): string {
-  const pattern = new RegExp(`${begin}[\\s\\S]*?${end}\\r?\\n?`, 'g');
-  return text.replace(pattern, '');
+/** The markers of the block of lane `id`, so two lanes in one job keep their own entries. */
+function markers(id: string): [string, string] {
+  return [`# devlanes action begin ${id}`, `# devlanes action end ${id}`];
 }
 
-/** `text` with the action's block listing `hosts`, replacing an earlier block. */
-export function withBlock(text: string, hosts: string[]): string {
-  const rest = withoutBlock(text).replace(/\s*$/, '');
+/** Escapes `text` for use inside a regular expression. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** `text` without the block of `id`. */
+export function withoutBlock(text: string, id: string): string {
+  const [begin, end] = markers(id).map(escapeRegExp);
+  return text.replace(new RegExp(`${begin}\\r?\\n[\\s\\S]*?${end}\\r?\\n?`, 'g'), '');
+}
+
+/** `text` with the block of `id` listing `hosts`, replacing an earlier block of `id`. */
+export function withBlock(text: string, id: string, hosts: string[], eol: string): string {
+  const rest = withoutBlock(text, id).replace(/\s*$/, '');
+  const [begin, end] = markers(id);
   const lines = [begin, ...hosts.map((host) => `127.0.0.1 ${host}`), end];
-  return `${rest}${rest ? '\r\n' : ''}${lines.join('\r\n')}\r\n`;
+  return `${rest}${rest ? eol : ''}${lines.join(eol)}${eol}`;
 }
 
 /** Whether `host` already resolves to loopback. */
@@ -54,14 +71,48 @@ export async function resolvesToLoopback(host: string): Promise<boolean> {
   }
 }
 
-/** Writes the block with `hosts` into the hosts file at `path`. */
-export async function addHosts(path: string, hosts: string[]): Promise<void> {
-  await writeFile(path, withBlock(await readFile(path, 'utf8'), hosts));
+/** Runs `sudo -n` with `args`, feeding `input` on stdin, and fails on a non-zero exit. */
+function sudo(args: string[], input = ''): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sudo', ['-n', ...args], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) =>
+      code === 0 ? resolve() : reject(new Error(`sudo ${args[0]} exited ${code}: ${stderr.trim()}`))
+    );
+    child.stdin.end(input);
+  });
 }
 
-/** Removes the action's block from the hosts file at `path`. */
-export async function removeHosts(path: string): Promise<void> {
+/** Replaces the hosts file with `text`, through sudo on macOS, and makes the resolver reread it. */
+async function writeHosts(platform: NodeJS.Platform, path: string, text: string): Promise<void> {
+  if (platform === 'win32') {
+    // The DNS client watches the file, so new entries resolve without a cache flush.
+    await writeFile(path, text);
+    return;
+  }
+  await sudo(['tee', path], text);
+  await sudo(['dscacheutil', '-flushcache']);
+  await sudo(['killall', '-HUP', 'mDNSResponder']).catch(() => {});
+}
+
+/** Writes the block of lane `id` with `hosts` into the hosts file. */
+export async function addHosts(
+  platform: NodeJS.Platform,
+  path: string,
+  id: string,
+  hosts: string[]
+) {
+  const eol = platform === 'win32' ? '\r\n' : '\n';
+  await writeHosts(platform, path, withBlock(await readFile(path, 'utf8'), id, hosts, eol));
+}
+
+/** Removes the block of lane `id` from the hosts file. */
+export async function removeHosts(platform: NodeJS.Platform, path: string, id: string) {
   const text = await readFile(path, 'utf8');
-  const cleaned = withoutBlock(text);
-  if (cleaned !== text) await writeFile(path, cleaned);
+  const cleaned = withoutBlock(text, id);
+  if (cleaned !== text) await writeHosts(platform, path, cleaned);
 }

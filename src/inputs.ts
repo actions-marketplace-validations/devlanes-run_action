@@ -84,7 +84,10 @@ function uploadMode(value: string): UploadMode {
  * The devlanes version this release of the action was tested with. action.yml has the same
  * default; an explicitly empty `version:` (such as an unset matrix value) gets it too.
  */
-export const defaultVersion = '0.6.1';
+export const defaultVersion = '0.7.0';
+
+/** The oldest devlanes the action supports; its CI runs against nothing older. */
+export const minimumVersion = '0.7.0';
 
 /** A `version` input normalized to `latest`, `next` or a bare `X.Y.Z[-pre]`. */
 export function version(value: string): string {
@@ -96,10 +99,32 @@ export function version(value: string): string {
   const bare = trimmed.startsWith('v') ? trimmed.slice(1) : trimmed;
   if (!/^\d+\.\d+\.\d+(-[0-9a-z.-]+)?$/.test(bare)) {
     throw new Error(
-      `Input "version" must be latest, next or a version such as 0.6.1, not "${value}"`
+      `Input "version" must be latest, next or a version such as ${defaultVersion}, not "${value}"`
     );
   }
+  if (compareVersions(bare, minimumVersion) < 0) {
+    throw new Error(`devlanes ${bare} is too old for this action; use ${minimumVersion} or later`);
+  }
   return bare;
+}
+
+/**
+ * Orders two `X.Y.Z[-pre]` versions as semver does: by number, then a prerelease before its
+ * release. Prerelease identifiers compare as text, which is enough for `-rc.N`-style tags.
+ */
+export function compareVersions(a: string, b: string): number {
+  const [aCore = '', aPre] = a.split('-', 2);
+  const [bCore = '', bPre] = b.split('-', 2);
+  const aParts = aCore.split('.').map(Number);
+  const bParts = bCore.split('.').map(Number);
+  for (let index = 0; index < 3; index++) {
+    const difference = (aParts[index] ?? 0) - (bParts[index] ?? 0);
+    if (difference !== 0) return Math.sign(difference);
+  }
+  if (aPre === bPre) return 0;
+  if (aPre === undefined) return 1;
+  if (bPre === undefined) return -1;
+  return aPre < bPre ? -1 : 1;
 }
 
 /** Non-empty entries of a list input split by `separator`. */
