@@ -18,7 +18,9 @@ concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Empty uses the default from action.yml. A dispatch can test another release, such as next.
+# Empty makes the action look for a lockfile that names devlanes, and this repository has none
+# above the fixtures it runs, so it uses the action's default. A dispatch can test another
+# release, such as next.
 env:
   DEVLANES_TEST_VERSION: ${{ inputs.version }}
 
@@ -334,6 +336,38 @@ jobs:
           devlanes daemon status
           test -n "$NODE_EXTRA_CA_CERTS"
 
+  lockfile:
+    name: Version from ${{ matrix.file }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fixture: lockfile-pnpm
+            file: pnpm-lock.yaml
+          - fixture: lockfile-uv
+            file: uv.lock
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # No version input, so the fixture's lockfile, which pins 0.7.0, decides.
+      - name: Install the version the lockfile pins
+        id: devlanes
+        uses: ./
+        with:
+          command: install
+          working-directory: test/fixtures/${{ matrix.fixture }}
+
+      - name: Check the version and where it came from
+        if: >-
+          steps.devlanes.outputs.version != '0.7.0' ||
+          steps.devlanes.outputs.version-source != format('test/fixtures/{0}/{1}', matrix.fixture, matrix.file)
+        run: |
+          echo "::error::version '${{ steps.devlanes.outputs.version }}' from '${{ steps.devlanes.outputs.version-source }}', expected 0.7.0 from test/fixtures/${{ matrix.fixture }}/${{ matrix.file }}"
+          exit 1
+
   failed-script:
     name: Failed with script
     runs-on: ubuntu-latest
@@ -457,6 +491,7 @@ jobs:
       - quiet
       - two-lanes
       - install
+      - lockfile
       - failed-script
       - unnamed
       - artifacts
