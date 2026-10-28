@@ -13,8 +13,19 @@ test('an empty input means the same as the default in action.yml', async () => {
   const metadata = parse(await readFile(new URL('../action.yml', import.meta.url), 'utf8')) as {
     inputs: Record<string, { default?: string }>;
   };
-  const defaults = readInputs((name) => metadata.inputs[name]?.default ?? '', 'linux');
+  // The token default is an expression the runner fills in; an empty token is valid on its own.
+  const defaults = readInputs(
+    (name) => (name === 'token' ? '' : (metadata.inputs[name]?.default ?? '')),
+    'linux'
+  );
   assert.deepEqual(readInputs(reader({}), 'linux'), defaults);
+  assert.match(metadata.inputs.token?.default ?? '', /github\.token/);
+});
+
+test('upload-logs takes true and false for always and never', () => {
+  assert.equal(readInputs(reader({ 'upload-logs': 'true' }), 'linux').uploadLogs, 'always');
+  assert.equal(readInputs(reader({ 'upload-logs': 'False' }), 'linux').uploadLogs, 'never');
+  assert.throws(() => readInputs(reader({ 'upload-logs': 'yes' }), 'linux'), /"upload-logs"/);
 });
 
 test('defaults', () => {
@@ -24,7 +35,8 @@ test('defaults', () => {
   assert.equal(inputs.shell, 'bash');
   assert.equal(inputs.workingDirectory, '.');
   assert.equal(inputs.trust, true);
-  assert.equal(inputs.hostsFile, false);
+  assert.equal(inputs.hostsFile, 'auto');
+  assert.equal(inputs.token, '');
   assert.equal(inputs.lowPorts, true);
   assert.equal(inputs.exportEnv, true);
   assert.equal(inputs.exportCa, true);

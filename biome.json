@@ -2,7 +2,7 @@
   "$schema": "https://biomejs.dev/schemas/latest/schema.json",
   "extends": ["@arthurfiorette/biomejs-config"],
   "files": {
-    "includes": ["!dist"]
+    "includes": ["!dist", "!**/*.md"]
   },
   "assist": {
     "actions": {

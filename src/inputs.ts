@@ -5,11 +5,13 @@ export const commands = ['start', 'with', 'stop', 'install'] as const;
 export const shells = ['bash', 'sh', 'pwsh', 'powershell', 'cmd'] as const;
 export const uploadModes = ['on-failure', 'always', 'never'] as const;
 export const cleanupModes = ['stop', 'clean', 'keep'] as const;
+export const hostsModes = ['auto', 'true', 'false'] as const;
 
 export type Command = (typeof commands)[number];
 export type Shell = (typeof shells)[number];
 export type UploadMode = (typeof uploadModes)[number];
 export type CleanupMode = (typeof cleanupModes)[number];
+export type HostsMode = (typeof hostsModes)[number];
 
 /** The action's inputs after parsing and validation. */
 export interface Inputs {
@@ -24,7 +26,7 @@ export interface Inputs {
   home: string;
   config: string;
   trust: boolean;
-  hostsFile: boolean;
+  hostsFile: HostsMode;
   lowPorts: boolean;
   exportEnv: boolean;
   exportCa: boolean;
@@ -32,6 +34,7 @@ export interface Inputs {
   artifactName: string;
   retentionDays: number | undefined;
   cleanup: CleanupMode;
+  token: string;
 }
 
 /** Reads one input by name, as `core.getInput` does. */
@@ -57,15 +60,24 @@ export function readInputs(read: InputReader, platform: NodeJS.Platform): Inputs
     home: read('home').trim(),
     config: read('config'),
     trust: flag(read, 'trust', true),
-    hostsFile: flag(read, 'hosts-file', false),
+    hostsFile: oneOf(read, 'hosts-file', hostsModes, 'auto'),
     lowPorts: flag(read, 'low-ports', true),
     exportEnv: flag(read, 'export-env', true),
     exportCa: flag(read, 'export-ca', true),
-    uploadLogs: oneOf(read, 'upload-logs', uploadModes, 'on-failure'),
+    uploadLogs: uploadMode(read('upload-logs')),
     artifactName: read('artifact-name').trim(),
     retentionDays: retention(read('retention-days')),
-    cleanup: oneOf(read, 'cleanup', cleanupModes, 'stop')
+    cleanup: oneOf(read, 'cleanup', cleanupModes, 'stop'),
+    token: read('token').trim()
   };
+}
+
+/** `upload-logs`, where `true` and `false` mean `always` and `never`. */
+function uploadMode(value: string): UploadMode {
+  const trimmed = value.trim().toLowerCase();
+  if (trimmed === 'true') return 'always';
+  if (trimmed === 'false') return 'never';
+  return oneOf(() => trimmed, 'upload-logs', uploadModes, 'on-failure');
 }
 
 /**

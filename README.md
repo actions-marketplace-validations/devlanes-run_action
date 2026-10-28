@@ -16,11 +16,11 @@ Tests read their base URLs from `DEVLANES_PUBLIC_URL_<SERVICE>`, such as `DEVLAN
 
 `command` picks what the action does after installing devlanes.
 
-`start` (the default) starts the lane and leaves it running for the steps after it. The action's post step, which GitHub runs at the end of the job even after a failure or a cancellation, writes each unit's log, uploads the logs when something failed and stops the lane and the daemon.
+`start` (the default) starts the lane and leaves it running for the steps after it. The action's post step, which GitHub runs at the end of the job even after a failure or a cancellation, stops the lane and the daemon, writes each unit's log and uploads the logs when any step of the job failed, the tests included.
 
 `with` starts the lane, runs the `run` script against it, then stops what it started, all in one step. The step fails with the script's exit code. It is [`devlanes with`](https://devlanes.run/docs/reference/cli#devlanes-with) with the action's setup around it.
 
-`stop` stops the lane now, writes its logs and uploads them by `upload-logs`. Use it when later steps need the machine without the lane, or to upload logs only when a test step failed.
+`stop` stops the lane now, writes its logs and uploads them by `upload-logs`, instead of waiting for the end of the job. Use it when later steps need the machine without the lane.
 
 `install` installs and prepares devlanes and starts the daemon, for workflows that call `devlanes` themselves. Later steps find `devlanes` on `PATH`.
 
@@ -41,14 +41,15 @@ While the lane starts, the log shows devlanes' own output: a collapsible group p
 | `home`              | `~/.devlanes`             | `DEVLANES_HOME`. The action exports it, so later `devlanes` commands reach the same daemon.                                                                                                                          |
 | `config`            |                           | YAML merged into the user `config.yaml` before the daemon starts, such as `proxy: { https_port: 9443 }`. Each setting goes through `devlanes config set`, which refuses unknown keys and invalid values.             |
 | `trust`             | `true`                    | On Linux, trust the devlanes CA in the system store and in the NSS store that Chromium and Playwright read. See [HTTPS](#https).                                                                                     |
-| `hosts-file`        | `false`                   | On Linux, install the `/etc/hosts` helper for programs that cannot resolve `*.localhost`, such as Wrangler's workerd.                                                                                                |
+| `hosts-file`        | `auto`                    | Hosts file entries for the lane's hostnames: `auto`, `true` or `false`. On Windows, `auto` adds them when `*.localhost` does not resolve. On Linux, `true` installs the `/etc/hosts` helper for programs that cannot resolve `*.localhost`, such as Wrangler's workerd. See [Hostnames](#hostnames). |
 | `low-ports`         | `true`                    | On Linux, let the proxy listen on 443 and 80, so public URLs carry no port.                                                                                                                                          |
 | `export-env`        | `true`                    | With `command: start`, give later steps the lane's variables: `DEVLANES_PUBLIC_URL_<SERVICE>`, `DEVLANES_PROJECT`, `DEVLANES_LANE` and the rest.                                                                     |
 | `export-ca`         | `true`                    | Set `NODE_EXTRA_CA_CERTS`, `DENO_CERT`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` for later steps and the `with` script.                                                                                              |
-| `upload-logs`       | `on-failure`              | When to upload the logs: `on-failure`, `always` or `never`.`on-failure` means this action's step failed or a unit had failed by the end of the job.                                                                  |
+| `upload-logs`       | `on-failure`              | When the end of the job uploads the logs: `on-failure`, `always` (or `true`) or `never` (or `false`). `on-failure` uploads when any step of the job failed or a unit had failed. See [Logs](#logs). |
 | `artifact-name`     | `devlanes-logs-<job id>`  | Name of the logs artifact. Jobs of a matrix share a job id, so later ones get `-2`, `-3` and so on.                                                                                                                  |
 | `retention-days`    | repository setting        | Days to keep the logs artifact.                                                                                                                                                                                      |
 | `cleanup`           | `stop`                    | What the end of the job does: `stop` stops the lane and the daemon this step started, `clean` also runs `devlanes lane clean` and `devlanes infra down` (for self-hosted runners), `keep` leaves everything running. |
+| `token`             | `github.token`            | Token for reading the job's steps from the GitHub API, which `upload-logs: on-failure` uses. |
 
 ## Outputs
 
@@ -113,7 +114,7 @@ In `playwright.config.ts`, set `baseURL: process.env.DEVLANES_PUBLIC_URL_WEB`. I
     run: pnpm test:e2e
 ```
 
-The lane stops when the script ends, so later steps cannot use it. The logs are uploaded when the script or the start fails.
+The lane stops when the script ends, so later steps cannot use it. The logs are uploaded at the end of the job by `upload-logs`, like after `start`.
 
 ### Secrets for services
 
@@ -127,21 +128,24 @@ Services get the environment of the step that started them, which is the action'
 
 devlanes keeps this environment in the daemon's memory and never writes it to disk.
 
-### Logs when the tests fail
-
-`on-failure` uploads when the start failed or a unit crashed. When the services stay healthy and a test fails, upload anyway with a `stop` step:
+### Logs
 
 ```yaml
 - uses: devlanes-run/action@v1
 - run: pnpm test:e2e
-- if: failure()
-  uses: devlanes-run/action@v1
-  with:
-    command: stop
-    upload-logs: always
 ```
 
-Or set `upload-logs: always` on the first step. The artifact holds `unit-<name>.log` for each unit, the daemon's log, the output of `devlanes doctor`, the lane's status and each container's log.
+When `pnpm test:e2e` fails, the end of the job stops the lane and uploads its logs as `devlanes-logs-<job id>`. The artifact holds `unit-<name>.log` for each unit, the daemon's log, the output of `devlanes doctor`, the lane's status and each container's log.
+
+An action cannot read the job's status, so the post step asks the GitHub API which steps of the job failed, with `token`. In a private repository the token needs `actions: read`:
+
+```yaml
+permissions:
+  contents: read
+  actions: read
+```
+
+Without it, the action cannot tell and uploads the logs anyway. `upload-logs: always` uploads after every job, and `never` turns uploads off.
 
 ### Sharded tests
 
@@ -203,6 +207,12 @@ The proxy serves every hostname over HTTPS with certificates from a devlanes CA 
 `trust` adds the CA to the OS store, which browsers and `curl` read. On Linux the action runs `devlanes certs trust` with `tls.trust: [system, chrome]`, installing `libnss3-tools` first when `certutil` is missing, so Chromium and Playwright's browsers trust it too. macOS and Windows ask for confirmation in a dialog that nobody can answer on a runner, so there the action skips it with a warning. On those runners, pass the `ca-cert` output to your tool, or use `ignoreHTTPSErrors` in browser tests. `trust: false` hides the warning.
 
 On Linux the proxy needs `low-ports` to listen on 443 and 80; without it, public URLs end in `:8443`. macOS and Windows bind those ports without help.
+
+### Hostnames
+
+Linux and macOS runners resolve `*.localhost` to loopback. Windows Server, which GitHub's Windows runners run, does not, so with `hosts-file: auto` the action adds the lane's hostnames to `C:\Windows\System32\drivers\etc\hosts` before anything starts and removes them at the end of the job. A hosts file takes only exact names, so wildcard hostnames (`*.acme.localhost`) do not resolve on Windows runners.
+
+Some programs skip the system resolver on any OS, such as Wrangler's workerd and Go programs built without cgo. On Linux, `hosts-file: true` installs devlanes' `/etc/hosts` helper for them; see [hostnames and HTTPS](https://devlanes.run/docs/guides/https) in the devlanes docs.
 
 ### Lanes in CI
 

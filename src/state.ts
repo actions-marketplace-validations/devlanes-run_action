@@ -12,6 +12,8 @@ export interface State {
   logsDir: string;
   lane: string;
   daemonStarted: boolean;
+  /** The Windows hosts file has the action's block, which the post step removes. */
+  hostsWritten: boolean;
   failed: boolean;
 }
 

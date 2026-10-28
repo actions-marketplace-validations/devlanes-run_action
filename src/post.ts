@@ -5,7 +5,9 @@
 import * as core from '@actions/core';
 import { cli, type Devlanes } from './devlanes.ts';
 import { childEnv } from './env.ts';
+import { hostsPath, removeHosts } from './hosts.ts';
 import { readInputs } from './inputs.ts';
+import { jobFailed } from './job.ts';
 import { defaultArtifactName, shouldUpload, uploadLogs, writeDiagnostics } from './logs.ts';
 import { failedUnits, type LaneEnv, type LaneSummary, type StatusPage } from './outputs.ts';
 import { loadState, stoppedVariable } from './state.ts';
@@ -48,6 +50,11 @@ async function post(): Promise<void> {
       }
     }
 
+    // Steps after the action, such as the tests, count too; only the API knows about them.
+    if (inputs.uploadLogs === 'on-failure' && !failed) {
+      failed = await jobFailed(process.env, inputs.token);
+    }
+
     if (shouldUpload(inputs.uploadLogs, failed)) {
       await attempt('upload the devlanes logs', async () => {
         await writeDiagnostics(devlanes, state.logsDir, lane);
@@ -65,6 +72,12 @@ async function post(): Promise<void> {
         await devlanes.run(['infra', 'down', '--yes'], { cwd: state.cwd, stream: true });
       });
     }
+  }
+
+  if (state.hostsWritten) {
+    await attempt('remove the hostnames from the hosts file', () =>
+      removeHosts(hostsPath(process.env))
+    );
   }
 
   if (state.daemonStarted) {

@@ -7,8 +7,10 @@ import * as core from '@actions/core';
 import { caFiles, caVariables } from './ca.ts';
 import { cli, type Devlanes } from './devlanes.ts';
 import { childEnv } from './env.ts';
+import { addHosts, hostsPath, laneHostnames, resolvesToLoopback } from './hosts.ts';
 import { type Inputs, readInputs } from './inputs.ts';
 import { install } from './install.ts';
+import { jobFailed } from './job.ts';
 import { defaultArtifactName, shouldUpload, uploadLogs, writeDiagnostics } from './logs.ts';
 import {
   failedUnits,
@@ -65,6 +67,7 @@ async function main(): Promise<void> {
     logsDir,
     lane: '',
     daemonStarted,
+    hostsWritten: false,
     failed: false
   };
   saveState(state);
@@ -80,8 +83,11 @@ async function main(): Promise<void> {
     }
   }
 
+  if (inputs.command === 'install') return;
+  state.hostsWritten = await windowsHosts(devlanes(), inputs, cwd);
+  saveState(state);
   if (inputs.command === 'start') await start(devlanes(), inputs, state);
-  else if (inputs.command === 'with') await withCommand(devlanes(), inputs, state);
+  else await withCommand(devlanes(), inputs, state);
 }
 
 /**
@@ -97,33 +103,63 @@ async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
     );
   }
 
-  await core.group('Set up devlanes', async () => {
+  const daemonStarted = await core.group('Set up devlanes', async () => {
     await applyConfig(
       devlanes,
       ciConfig.map(([key, value]) => ({ key, value }))
     );
     await applyConfig(devlanes, flattenConfig(inputs.config));
 
+    const helper = inputs.hostsFile === 'true';
     if (process.platform === 'linux') {
       if (inputs.lowPorts) await allowLowPorts();
-      if (inputs.trust || inputs.hostsFile) await trustLinux(devlanes, inputs.hostsFile);
-    } else if (inputs.trust) {
-      core.warning(trustSkippedWarning(process.platform));
+      if (inputs.trust || helper) await trustLinux(devlanes, helper);
+    } else {
+      if (inputs.trust) core.warning(trustSkippedWarning(process.platform));
+      if (helper && process.platform === 'darwin') {
+        core.warning('hosts-file: true has no effect on macOS runners, which resolve *.localhost');
+      }
     }
+
+    let started = false;
+    if (!before.running) {
+      const result = await devlanes.run(['daemon', 'start'], { stream: true });
+      if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
+      started = true;
+    }
+    return started;
   });
 
+  // After the daemon starts, so it reports the proxy's ports and the hostname lookup it tried.
   await core.group('devlanes doctor', async () => {
     await devlanes.run(['doctor'], { stream: true });
   });
-
-  let started = false;
-  if (!before.running) {
-    const result = await devlanes.run(['daemon', 'start'], { stream: true });
-    if (result.code !== 0) throw new Error(`devlanes daemon start exited ${result.code}`);
-    started = true;
-  }
   core.exportVariable(readyVariable, '1');
-  return started;
+  return daemonStarted;
+}
+
+/**
+ * Adds the lane's hostnames to the Windows hosts file when they do not resolve, before anything
+ * calls them. Returns whether the file was changed, so the post step can undo it.
+ */
+async function windowsHosts(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<boolean> {
+  if (process.platform !== 'win32' || inputs.hostsFile === 'false') return false;
+  const laneEnv = await currentLane(devlanes, cwd);
+  if (!laneEnv) return false;
+  const hosts = laneHostnames(await laneStatus(devlanes, laneEnv.lane, cwd));
+  if (hosts.length === 0) return false;
+  if (inputs.hostsFile === 'auto' && (await resolvesToLoopback(hosts[0] ?? ''))) return false;
+
+  try {
+    await addHosts(hostsPath(process.env), hosts);
+    core.info(`Added ${hosts.join(', ')} to the hosts file`);
+    return true;
+  } catch (error) {
+    core.warning(
+      `Could not add the lane's hostnames to the hosts file, which needs an elevated runner: ${message(error)}`
+    );
+    return false;
+  }
 }
 
 /** `--timeout` and `--profile` flags from the inputs. */
@@ -242,7 +278,10 @@ async function stop(
     cwd,
     stream: true
   });
-  const failed = result.code !== 0 || failedUnits(lane).length > 0;
+  let failed = result.code !== 0 || failedUnits(lane).length > 0;
+  if (inputs.uploadLogs === 'on-failure' && !failed) {
+    failed = await jobFailed(process.env, inputs.token);
+  }
 
   if (shouldUpload(inputs.uploadLogs, failed)) {
     await writeDiagnostics(devlanes, logsDir, lane);

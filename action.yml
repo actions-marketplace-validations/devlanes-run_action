@@ -53,9 +53,12 @@ inputs:
     required: false
     default: "true"
   hosts-file:
-    description: On Linux, install the /etc/hosts helper for programs that cannot resolve *.localhost, such as Wrangler's workerd.
+    description: >-
+      Hosts file entries for the lane's hostnames, as auto, true or false. On Windows, auto writes
+      them when *.localhost does not resolve, as on Windows Server. On Linux, true installs the
+      /etc/hosts helper for programs that cannot resolve *.localhost, such as Wrangler's workerd.
     required: false
-    default: "false"
+    default: auto
   low-ports:
     description: On Linux, let the proxy listen on 443 and 80, so public URLs carry no port.
     required: false
@@ -69,7 +72,9 @@ inputs:
     required: false
     default: "true"
   upload-logs:
-    description: When to upload the logs as an artifact, as on-failure, always or never. on-failure means this action's step failed or a unit had failed by the end of the job.
+    description: >-
+      When the end of the job uploads the logs as an artifact, as on-failure, always (or true) or
+      never (or false). on-failure uploads when any step of the job failed or a unit had failed.
     required: false
     default: on-failure
   artifact-name:
@@ -84,6 +89,12 @@ inputs:
     description: What the end of the job does, as stop (the lane and the daemon this step started), clean (also lane clean and infra down, for self-hosted runners) or keep.
     required: false
     default: stop
+  token:
+    description: >-
+      Token for reading this job's steps from the GitHub API, which tells upload-logs on-failure
+      whether a step failed. Private repositories need `actions: read` in the job's permissions.
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   version:

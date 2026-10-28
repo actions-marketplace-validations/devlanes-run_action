@@ -56,6 +56,8 @@ jobs:
         run: |
           if [ -n "$(git status --porcelain -- dist)" ]; then
             git status --short -- dist
+            git diff --stat -- dist
+            git diff -- dist | head -100
             echo "::error::dist/ differs from a fresh build; run pnpm build and commit dist/"
             exit 1
           fi
@@ -190,9 +192,31 @@ jobs:
           echo "::error::the start succeeded although broken exits 3"
           exit 1
 
+  failed-test:
+    name: Failed test step
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The failing step is the point; the artifacts job checks that its logs were uploaded.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start the lane
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/basic
+          artifact-name: devlanes-logs-failed-test
+          retention-days: 1
+
+      - name: Fail like a test would
+        run: exit 1
+
   artifacts:
     name: Uploaded logs
-    needs: [infra, failure]
+    if: ${{ !cancelled() }}
+    needs: [infra, failure, failed-test]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -212,3 +236,6 @@ jobs:
         run: |
           node test/e2e/logs.mjs artifacts/devlanes-logs-failure-Linux unit-broken.log unit-api.log
           node test/e2e/logs.mjs artifacts/devlanes-logs-failure-Windows unit-broken.log unit-api.log
+
+      - name: Check the logs of a job whose test step failed
+        run: node test/e2e/logs.mjs artifacts/devlanes-logs-failed-test unit-api.log unit-worker.log

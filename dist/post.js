@@ -1,8 +1,10 @@
-import { cli, getInput, core_warning, shouldUpload, uploadLogs, core_info, defaultArtifactName, writeDiagnostics, stoppedVariable, failedUnits, childEnv, readInputs, loadState } from "./7.js";
+import { cli, getInput, shouldUpload, uploadLogs, stoppedVariable, core_info, readInputs, removeHosts, defaultArtifactName, core_warning, jobFailed, writeDiagnostics, failedUnits, childEnv, hostsPath, loadState } from "./q.js";
 
 // The action's post step, which the runner runs at the end of the job even after a failure or
 // a cancellation: stop the lane, upload its logs and stop the daemon this invocation started.
 // Problems here are warnings, since the job's result belongs to its own steps.
+
+
 
 
 
@@ -54,6 +56,10 @@ import { cli, getInput, core_warning, shouldUpload, uploadLogs, core_info, defau
                 }
             }
         }
+        // Steps after the action, such as the tests, count too; only the API knows about them.
+        if (inputs.uploadLogs === 'on-failure' && !failed) {
+            failed = await jobFailed(process.env, inputs.token);
+        }
         if (shouldUpload(inputs.uploadLogs, failed)) {
             await attempt('upload the devlanes logs', async ()=>{
                 await writeDiagnostics(devlanes, state.logsDir, lane);
@@ -81,6 +87,9 @@ import { cli, getInput, core_warning, shouldUpload, uploadLogs, core_info, defau
                 });
             });
         }
+    }
+    if (state.hostsWritten) {
+        await attempt('remove the hostnames from the hosts file', ()=>removeHosts(hostsPath(process.env)));
     }
     if (state.daemonStarted) {
         await attempt('stop the daemon', async ()=>{
