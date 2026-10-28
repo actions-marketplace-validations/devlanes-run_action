@@ -250,21 +250,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout
+      # devlanes gives a checkout one lane, also to anything below it, so each project gets a
+      # checkout of its own next to the other (devlanes-run/devlanes#90).
+      - name: Checkout the first project
         uses: actions/checkout@v7
+        with:
+          path: first
 
-      # devlanes gives a Git checkout one lane, so the second project needs a checkout of its own.
-      - name: Checkout again for the second project
+      - name: Checkout the second project
         uses: actions/checkout@v7
         with:
           path: second
 
       - name: Start the first project
         id: basic
-        uses: ./
+        uses: ./first
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
-          working-directory: test/fixtures/basic
+          working-directory: first/test/fixtures/basic
           config: |
             proxy:
               lan: false
@@ -273,13 +276,19 @@ jobs:
 
       - name: Start the second project
         id: infra
-        uses: ./
+        uses: ./first
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
           working-directory: second/test/fixtures/infra
           upload-logs: always
           artifact-name: devlanes-logs-two-infra
           cleanup: clean
+
+      - name: Check each project has its own lane
+        if: steps.basic.outputs.lane == steps.infra.outputs.lane
+        run: |
+          echo "::error::both projects use ${{ steps.basic.outputs.lane }}"
+          exit 1
 
       - name: Check each lane has its own logs folder
         if: steps.basic.outputs.logs-dir == steps.infra.outputs.logs-dir
@@ -289,11 +298,11 @@ jobs:
 
       # The first project's post step must skip its stopped lane and leave the second alone.
       - name: Stop the first project
-        uses: ./
+        uses: ./first
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
           command: stop
-          working-directory: test/fixtures/basic
+          working-directory: first/test/fixtures/basic
           upload-logs: never
 
   install:

@@ -212,7 +212,26 @@ Each shard runs its own lane on its own runner.
     working-directory: apps/storefront
 ```
 
-devlanes gives a Git checkout one lane, so a second `devlanes.yaml` in the same checkout ends up in the first one's lane. To run a second project in the same job, check the repository out again with `actions/checkout`'s `path` and point the second use of the action there. Each use then has its own lane, logs folder and artifact (set `artifact-name` on each), and the first one prepares the runner and starts the daemon both share.
+devlanes gives a checkout one lane, and a folder below it shares that lane, so a second `devlanes.yaml` in the same checkout ends up in the first one's lane ([devlanes#90](https://github.com/devlanes-run/devlanes/issues/90)). To run two projects in one job, check the repository out twice into folders side by side, neither inside the other:
+
+```yaml
+- uses: actions/checkout@v7
+  with:
+    path: storefront
+- uses: actions/checkout@v7
+  with:
+    path: admin
+- uses: devlanes-run/action@v1
+  with:
+    working-directory: storefront/apps/storefront
+    artifact-name: devlanes-logs-storefront
+- uses: devlanes-run/action@v1
+  with:
+    working-directory: admin/apps/admin
+    artifact-name: devlanes-logs-admin
+```
+
+Each use then has its own lane, logs folder and artifact, and the first one prepares the runner and starts the daemon both share.
 
 ### Self-hosted runners
 
