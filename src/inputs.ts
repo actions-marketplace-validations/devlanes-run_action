@@ -148,7 +148,7 @@ function oneOf<T extends string>(
   throw new Error(`Input "${name}" must be one of ${choices.join(', ')}, not "${value}"`);
 }
 
-/** A boolean input in the YAML 1.2 core schema spellings that `core.getBooleanInput` accepts. */
+/** A boolean input, `true` or `false` in any letter case. */
 function flag(read: InputReader, name: string, fallback: boolean): boolean {
   const value = read(name).trim().toLowerCase();
   if (!value) return fallback;

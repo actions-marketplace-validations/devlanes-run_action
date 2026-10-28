@@ -9,7 +9,7 @@ import {
   urlOutputs
 } from './outputs.ts';
 
-// Trimmed from `devlanes status --json` of devlanes 0.6.1.
+// Trimmed from `devlanes status --json`.
 const lane: LaneSummary = {
   reference: 'acme@0',
   index: 0,

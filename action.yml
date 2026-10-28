@@ -60,8 +60,8 @@ inputs:
     default: ""
   config:
     description: >-
-      YAML merged into the user config.yaml before the daemon starts, such as
-      `proxy: { https_port: 9443 }`. Only the first use of the action in a job applies it.
+      YAML merged into the user config.yaml before the daemon starts, passed as a string such as
+      a `|` block. Only the first use of the action in a job applies it.
     required: false
     default: ""
   trust:
@@ -76,7 +76,7 @@ inputs:
       Hosts file entries for the lane's hostnames: `auto`, `true` or `false`. On Windows and macOS,
       `auto` writes them when `*.localhost` does not resolve and `true` always does. On Linux,
       `true` installs devlanes' /etc/hosts helper (which also trusts the CA) for programs that
-      skip the system resolver, such as Wrangler's workerd.
+      skip the system resolver, such as Wrangler's workerd; only the first use in a job does that.
     required: false
     default: auto
   low-ports:
@@ -94,7 +94,8 @@ inputs:
   export-ca:
     description: >-
       Set `NODE_EXTRA_CA_CERTS`, `DENO_CERT`, `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` for later
-      steps and the `with` script, so they trust the devlanes CA on every OS.
+      steps and the `with` script, so Node, Deno, Python and tools built on OpenSSL trust the
+      devlanes CA on every OS.
     required: false
     default: "true"
   upload-logs:
@@ -106,7 +107,8 @@ inputs:
   artifact-name:
     description: >-
       Name of the logs artifact. Defaults to `devlanes-logs-<job name>-<lane>`, such as
-      `devlanes-logs-e2e-ubuntu-latest-acme-0`, so matrix jobs and projects never share one.
+      `devlanes-logs-e2e-ubuntu-latest-acme-0`, which differs between matrix jobs and projects;
+      when the API cannot name the job, the runner's name takes its place.
     required: false
     default: ""
   retention-days:
@@ -122,9 +124,9 @@ inputs:
     default: stop
   token:
     description: >-
-      Token for reading this job's steps from the GitHub API, which tells `upload-logs: on-failure`
-      whether a step failed. Rarely needs changing; private repositories need `actions: read` in
-      the job's permissions.
+      Token for reading this job from the GitHub API, which tells `upload-logs: on-failure` whether
+      a step failed and names the default artifact. Rarely needs changing; private repositories
+      need `actions: read` in the job's permissions.
     required: false
     default: ${{ github.token }}
 
@@ -132,35 +134,45 @@ outputs:
   version:
     description: The installed devlanes version.
   home:
-    description: The devlanes home in use.
+    description: The devlanes home in use. Set by every command but `stop`.
   lane:
-    description: The lane reference, such as `acme@0`.
+    description: The lane reference, such as `acme@0`. Set by `start`, `with` and `stop`.
   lane-index:
-    description: The lane number.
+    description: The lane number. Set by `command: start`.
   domain:
-    description: The lane's domain, such as `acme.localhost`.
+    description: The lane's domain, such as `acme.localhost`. Set by `command: start`.
   https-port:
-    description: The port the HTTPS proxy listens on, 443 or a fallback such as 8443.
+    description: >-
+      The port the HTTPS proxy listens on, 443 or a fallback such as 8443. Set by
+      `command: start`.
   urls:
     description: >-
       JSON object of each service's URL, through the proxy when it has hostnames. Read one with
-      `fromJSON(steps.<id>.outputs.urls).api`.
+      `fromJSON(steps.<id>.outputs.urls).api`. Set by `command: start`.
   services:
-    description: JSON object of each service's `state`, `kind`, `port`, `ports`, `url`, `public_url` and `urls`.
+    description: >-
+      JSON object of each service's `state`, `kind`, `port`, `ports`, `url`, `public_url` and
+      `urls`. Set by `command: start`.
   infra:
-    description: JSON object of each container's `state`, `shared`, `ports` and `urls`.
+    description: >-
+      JSON object of each container's `state`, `shared`, `ports` and `urls`; `ports` maps the
+      container port (Compose) or port name (plain containers) to the host port. Set by
+      `command: start`.
   env:
-    description: JSON object of the lane's environment variables.
+    description: JSON object of the lane's environment variables. Set by `command: start`.
   ca-cert:
-    description: Path of the devlanes CA certificate.
+    description: Path of the devlanes CA certificate. Set by every command but `stop`.
   ca-bundle:
-    description: Path of the bundle with the system roots and the devlanes CA.
+    description: >-
+      Path of the bundle with the system roots and the devlanes CA. Set by every command but
+      `stop`.
   logs-dir:
-    description: Folder of the lane's logs, written when the lane stops.
+    description: >-
+      Folder of the lane's logs, written when the lane stops. Set by `start`, `with` and `stop`.
   exit-code:
     description: >-
       Exit code of `devlanes with`: the script's code, or 1 when the lane failed to start and the
-      script did not run.
+      script did not run. Set by `command: with`.
 
 runs:
   using: node24

@@ -322,6 +322,8 @@ jobs:
         with:
           version: ${{ env.DEVLANES_TEST_VERSION }}
           command: install
+          # A Windows home must be private, which the runner's temp folder is not.
+          home: ${{ runner.os == 'Linux' && format('{0}/devlanes', runner.temp) || '' }}
 
       - name: Use devlanes from a later step
         shell: bash
@@ -330,10 +332,57 @@ jobs:
           devlanes daemon status
           test -n "$NODE_EXTRA_CA_CERTS"
 
+  failed-script:
+    name: Failed with script
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run a script that fails
+        id: devlanes
+        continue-on-error: true
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: with
+          working-directory: test/fixtures/basic
+          run: exit 3
+          artifact-name: devlanes-logs-failed-script
+          retention-days: 1
+
+      - name: Check the step failed with the script's code
+        if: steps.devlanes.outcome != 'failure' || steps.devlanes.outputs.exit-code != '3'
+        run: |
+          echo "::error::outcome ${{ steps.devlanes.outcome }}, exit-code ${{ steps.devlanes.outputs.exit-code }}"
+          exit 1
+
+  unnamed:
+    name: Logs without access to the jobs API
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The test step fails on purpose; the artifacts job checks the fallback name.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start the lane
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/basic
+          token: not-a-token
+          retention-days: 1
+
+      - name: Fail like a test would
+        run: exit 1
+
   artifacts:
     name: Uploaded logs
     if: ${{ !cancelled() }}
-    needs: [e2e, infra, failure, failed-test, quiet, two-lanes]
+    needs: [e2e, infra, failure, failed-test, quiet, two-lanes, failed-script, unnamed]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -357,12 +406,27 @@ jobs:
       - name: Check the logs of a job whose test step failed
         run: node test/e2e/logs.mjs artifacts/devlanes-logs-failed-test unit-api.log unit-worker.log
 
+      - name: Check the failed script's logs
+        run: node test/e2e/logs.mjs artifacts/devlanes-logs-failed-script unit-api.log unit-worker.log
+
+      # With a token the API refuses, the name falls back to the job id and the runner's name.
+      - name: Check the logs uploaded without access to the jobs API
+        shell: bash
+        run: |
+          shopt -s nullglob
+          found=(artifacts/devlanes-logs-unnamed-*-fixture-*)
+          if [ ${#found[@]} -ne 1 ]; then
+            echo "::error::expected one devlanes-logs-unnamed-<runner>-<lane> artifact: ${found[*]}"
+            exit 1
+          fi
+          node test/e2e/logs.mjs "${found[0]}" unit-api.log
+
       - name: Check the second project's logs and that the stopped one uploaded nothing
         run: |
           node test/e2e/logs.mjs artifacts/devlanes-logs-two-infra unit-api.log infra-whoami.log
           test ! -e artifacts/devlanes-logs-two-basic
 
-      - name: Check passing jobs uploaded nothing and matrix jobs took free names
+      - name: Check passing jobs uploaded nothing and matrix jobs got their own names
         shell: bash
         run: |
           shopt -s nullglob

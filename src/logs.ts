@@ -1,5 +1,5 @@
 // Log artifacts. devlanes writes one file per unit with --logs-dir; the action adds what those
-// files miss when something broke (the daemon's log, doctor, container logs) and uploads them.
+// files miss (the daemon's log, doctor, container logs) on a stop step and before an upload.
 
 import { readdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -9,6 +9,7 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import * as core from '@actions/core';
 import type { Devlanes } from './devlanes.ts';
 import type { UploadMode } from './inputs.ts';
+import { jobName } from './job.ts';
 import type { LaneSummary } from './outputs.ts';
 
 /**
@@ -37,15 +38,33 @@ function slug(text: string): string {
  * The artifact name when `artifact-name` is empty: the job's display name, which differs
  * between the jobs of a matrix, and the lane, which differs between projects in one job. The
  * artifact service accepts the same name from several jobs and keeps only one of them, so a
- * name shared by two jobs would lose logs.
+ * name shared by two jobs would lose logs. Without a display name, the runner's name keeps the
+ * jobs of a matrix apart instead.
  */
 export function defaultArtifactName(
   env: NodeJS.ProcessEnv,
   jobName: string | null,
   lane: string
 ): string {
-  const job = slug(jobName || env.GITHUB_JOB || 'job');
+  const job = slug(jobName || [env.GITHUB_JOB || 'job', env.RUNNER_NAME ?? ''].join('-'));
   return lane ? `devlanes-logs-${job}-${slug(lane)}` : `devlanes-logs-${job}`;
+}
+
+/** The artifact name to upload under: `artifact-name`, else the default for this job and lane. */
+export async function artifactName(
+  given: string,
+  env: NodeJS.ProcessEnv,
+  token: string,
+  lane: string
+): Promise<string> {
+  if (given) return given;
+  const name = await jobName(env, token);
+  if (!name) {
+    core.warning(
+      "Could not read this job's name from the GitHub API, so the logs artifact is named after the runner; set artifact-name for a stable name"
+    );
+  }
+  return defaultArtifactName(env, name, lane);
 }
 
 /** Every file under `dir`. */

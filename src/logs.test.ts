@@ -29,9 +29,14 @@ test('default artifact names tell matrix jobs and lanes apart', () => {
     defaultArtifactName({ GITHUB_JOB: 'e2e' }, 'E2E (ubuntu-latest, 2/4)', ''),
     'devlanes-logs-e2e-ubuntu-latest-2-4'
   );
+  // Without the display name, the runner's name keeps the jobs of a matrix apart.
   assert.equal(
-    defaultArtifactName({ GITHUB_JOB: 'e2e' }, null, 'acme@0'),
-    'devlanes-logs-e2e-acme-0'
+    defaultArtifactName(
+      { GITHUB_JOB: 'e2e', RUNNER_NAME: 'GitHub Actions 1000123' },
+      null,
+      'acme@0'
+    ),
+    'devlanes-logs-e2e-github-actions-1000123-acme-0'
   );
   assert.equal(defaultArtifactName({}, null, ''), 'devlanes-logs-job');
 });

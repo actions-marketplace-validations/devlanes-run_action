@@ -135,16 +135,17 @@ export async function trustLinux(
   hostsFile: boolean,
   stores: boolean
 ): Promise<void> {
+  // A `tls.trust` from the workflow, such as one with firefox, needs certutil as much as ours.
+  const certutil = await ensureCertutil();
   if (stores) {
-    const trustBrowsers = await ensureCertutil();
     await applyConfig(devlanes, [
-      { key: 'tls.trust', value: trustBrowsers ? '[system, chrome]' : '[system]' }
+      { key: 'tls.trust', value: certutil ? '[system, chrome]' : '[system]' }
     ]);
-    if (!trustBrowsers) {
-      core.warning(
-        'certutil is missing and could not be installed; Chromium will not trust the devlanes CA'
-      );
-    }
+  }
+  if (!certutil) {
+    core.warning(
+      'certutil is missing and could not be installed; browsers on this runner will not trust the devlanes CA'
+    );
   }
 
   const args = hostsFile ? ['certs', 'trust', '--hosts'] : ['certs', 'trust'];

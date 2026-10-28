@@ -1,4 +1,4 @@
-import { cli, getInput, shouldUpload, uploadLogs, core_info, job_jobName, readInputs, removeHosts, defaultArtifactName, core_warning, jobFailed, stoppedLanes, writeDiagnostics, failedUnits, childEnv, hostsPath, laneLogsDir, loadState } from "./q.js";
+import { cli, getInput, shouldUpload, uploadLogs, core_info, logs_artifactName, readInputs, removeHosts, core_warning, jobFailed, stoppedLanes, writeDiagnostics, failedUnits, childEnv, hostsPath, laneLogsDir, loadState } from "./a.js";
 
 // The action's post step, which the runner runs at the end of the job even after a failure or
 // a cancellation: stop the lane, upload its logs and stop the daemon this invocation started.
@@ -64,7 +64,7 @@ import { cli, getInput, shouldUpload, uploadLogs, core_info, job_jobName, readIn
         if (shouldUpload(inputs.uploadLogs, failed)) {
             await attempt('upload the devlanes logs', async ()=>{
                 await writeDiagnostics(devlanes, state.logsDir, lane);
-                const name = inputs.artifactName || defaultArtifactName(process.env, await job_jobName(process.env, inputs.token), reference);
+                const name = await logs_artifactName(inputs.artifactName, process.env, inputs.token, reference);
                 await uploadLogs(state.logsDir, name, inputs.retentionDays);
             });
         }

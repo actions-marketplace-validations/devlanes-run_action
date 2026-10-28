@@ -10,14 +10,8 @@ import { childEnv } from './env.ts';
 import { addHosts, hostsPath, laneHostnames, resolvesToLoopback } from './hosts.ts';
 import { type Inputs, readInputs } from './inputs.ts';
 import { install } from './install.ts';
-import { jobFailed, jobName } from './job.ts';
-import {
-  defaultArtifactName,
-  laneLogsDir,
-  shouldUpload,
-  uploadLogs,
-  writeDiagnostics
-} from './logs.ts';
+import { jobFailed } from './job.ts';
+import { artifactName, laneLogsDir, shouldUpload, uploadLogs, writeDiagnostics } from './logs.ts';
 import {
   failedUnits,
   type HostsPage,
@@ -106,15 +100,18 @@ async function main(): Promise<void> {
   if (laneEnv) {
     state.lane = laneEnv.lane;
     core.setOutput('lane', laneEnv.lane);
+    // A lane started again after a `command: stop` needs its post step back.
+    const stopped = stoppedLanes(process.env);
+    if (stopped.includes(laneEnv.lane)) {
+      const rest = stopped.filter((lane) => lane !== laneEnv.lane);
+      core.exportVariable(stoppedVariable, rest.join('\n'));
+    }
   }
   state.logsDir = laneLogsDir(process.env, state.lane);
   core.setOutput('logs-dir', state.logsDir);
   saveState(state);
 
-  if (state.lane && (await laneHosts(devlanes(), inputs, state.lane, cwd))) {
-    state.hostsLane = state.lane;
-    saveState(state);
-  }
+  if (state.lane) await laneHosts(devlanes(), inputs, state, cwd);
 
   if (inputs.command === 'start') await start(devlanes(), inputs, state);
   else await withCommand(devlanes(), inputs, state);
@@ -128,7 +125,7 @@ async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
   const before = await daemonStatus(devlanes);
   if (process.env[readyVariable] && before.running) {
     core.info(
-      'devlanes is already set up in this job; config, trust, low-ports and hosts-file: true apply only to the first use of the action'
+      'devlanes is already set up in this job; config, trust, low-ports and, on Linux, hosts-file: true apply only to the first use of the action'
     );
     return false;
   }
@@ -172,29 +169,31 @@ async function prepare(devlanes: Devlanes, inputs: Inputs): Promise<boolean> {
 
 /**
  * Adds the lane's hostnames to the hosts file on Windows and macOS when they do not resolve,
- * before anything calls them. Returns whether the file was changed, so the post step undoes it.
+ * before anything calls them, and records it so the post step removes them.
  */
 async function laneHosts(
   devlanes: Devlanes,
   inputs: Inputs,
-  lane: string,
+  state: State,
   cwd: string
-): Promise<boolean> {
+): Promise<void> {
   const platform = process.platform;
-  if (platform === 'linux' || inputs.hostsFile === 'false') return false;
-  const hosts = laneHostnames(await laneStatus(devlanes, lane, cwd));
-  if (hosts.length === 0) return false;
-  if (inputs.hostsFile === 'auto' && (await resolvesToLoopback(hosts[0] ?? ''))) return false;
+  if (platform === 'linux' || inputs.hostsFile === 'false') return;
+  const hosts = laneHostnames(await laneStatus(devlanes, state.lane, cwd));
+  if (hosts.length === 0) return;
+  if (inputs.hostsFile === 'auto' && (await resolvesToLoopback(hosts[0] ?? ''))) return;
 
+  // Recorded first: a write that fails halfway may still have changed the file, and removing a
+  // block that is not there does nothing.
+  state.hostsLane = state.lane;
+  saveState(state);
   try {
-    await addHosts(platform, hostsPath(platform, process.env), lane, hosts);
+    await addHosts(platform, hostsPath(platform, process.env), state.lane, hosts);
     core.info(`Added ${hosts.join(', ')} to the hosts file`);
-    return true;
   } catch (error) {
     core.warning(
       `Could not add the lane's hostnames to the hosts file, which needs an elevated runner on Windows and passwordless sudo on macOS: ${message(error)}`
     );
-    return false;
   }
 }
 
@@ -322,9 +321,7 @@ async function stop(devlanes: Devlanes, inputs: Inputs, cwd: string): Promise<vo
   // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
   await writeDiagnostics(devlanes, logsDir, lane);
   if (shouldUpload(inputs.uploadLogs, failed)) {
-    const name =
-      inputs.artifactName ||
-      defaultArtifactName(process.env, await jobName(process.env, inputs.token), laneEnv.lane);
+    const name = await artifactName(inputs.artifactName, process.env, inputs.token, laneEnv.lane);
     await uploadLogs(logsDir, name, inputs.retentionDays);
   }
   const stopped = [...stoppedLanes(process.env), laneEnv.lane];

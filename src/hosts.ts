@@ -95,7 +95,8 @@ async function writeHosts(platform: NodeJS.Platform, path: string, text: string)
     return;
   }
   await sudo(['tee', path], text);
-  await sudo(['dscacheutil', '-flushcache']);
+  // The file is written; a cache that stays stale only delays the new names.
+  await sudo(['dscacheutil', '-flushcache']).catch(() => {});
   await sudo(['killall', '-HUP', 'mDNSResponder']).catch(() => {});
 }
 

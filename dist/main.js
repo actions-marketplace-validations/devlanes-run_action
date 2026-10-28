@@ -7,7 +7,7 @@ import "child_process";
 import { ok as external_assert_ok } from "assert";
 import { spawn } from "node:child_process";
 import { __webpack_require__ } from "./rslib-runtime.js";
-import { cli, getInput, shouldUpload, stoppedVariable, urlOutputs, mkdirP, io_cp, job_jobName, readInputs, resolvesToLoopback, serviceOutputs, rmRF, stoppedLanes, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, laneLogsDir, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, defaultArtifactName, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./q.js";
+import { cli, getInput, shouldUpload, stoppedVariable, logs_artifactName, mkdirP, io_cp, urlOutputs, readInputs, resolvesToLoopback, serviceOutputs, rmRF, stoppedLanes, addHosts, writeDiagnostics, infraOutputs, failedUnits, setOutput, hostsPath, laneLogsDir, readyVariable, uploadLogs, addPath, parseJson, core_info, laneHostnames, httpsPort, core_debug, exportVariable, core_warning, setFailed, jobFailed, lib_HttpClient, state_saveState, isDebug, core_group, which, childEnv, exec_exec } from "./a.js";
 
 import { createRequire as __rspack_createRequire } from "node:module";
 const __rspack_createRequire_require = __rspack_createRequire(import.meta.url);
@@ -12135,17 +12135,18 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
  * Trusts the devlanes CA on Linux through `devlanes certs trust`; problems become warnings.
  * `stores` false keeps a `tls.trust` the workflow set through the `config` input.
  */ async function trustLinux(devlanes, hostsFile, stores) {
+    // A `tls.trust` from the workflow, such as one with firefox, needs certutil as much as ours.
+    const certutil = await ensureCertutil();
     if (stores) {
-        const trustBrowsers = await ensureCertutil();
         await applyConfig(devlanes, [
             {
                 key: 'tls.trust',
-                value: trustBrowsers ? '[system, chrome]' : '[system]'
+                value: certutil ? '[system, chrome]' : '[system]'
             }
         ]);
-        if (!trustBrowsers) {
-            core_warning('certutil is missing and could not be installed; Chromium will not trust the devlanes CA');
-        }
+    }
+    if (!certutil) {
+        core_warning('certutil is missing and could not be installed; browsers on this runner will not trust the devlanes CA');
     }
     const args = hostsFile ? [
         'certs',
@@ -12339,14 +12340,17 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     if (laneEnv) {
         state.lane = laneEnv.lane;
         setOutput('lane', laneEnv.lane);
+        // A lane started again after a `command: stop` needs its post step back.
+        const stopped = stoppedLanes(process.env);
+        if (stopped.includes(laneEnv.lane)) {
+            const rest = stopped.filter((lane)=>lane !== laneEnv.lane);
+            exportVariable(stoppedVariable, rest.join('\n'));
+        }
     }
     state.logsDir = laneLogsDir(process.env, state.lane);
     setOutput('logs-dir', state.logsDir);
     state_saveState(state);
-    if (state.lane && await laneHosts(devlanes(), inputs, state.lane, cwd)) {
-        state.hostsLane = state.lane;
-        state_saveState(state);
-    }
+    if (state.lane) await laneHosts(devlanes(), inputs, state, cwd);
     if (inputs.command === 'start') await start(devlanes(), inputs, state);
     else await withCommand(devlanes(), inputs, state);
 }
@@ -12356,7 +12360,7 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
  */ async function prepare(devlanes, inputs) {
     const before = await daemonStatus(devlanes);
     if (process.env[readyVariable] && before.running) {
-        core_info('devlanes is already set up in this job; config, trust, low-ports and hosts-file: true apply only to the first use of the action');
+        core_info('devlanes is already set up in this job; config, trust, low-ports and, on Linux, hosts-file: true apply only to the first use of the action');
         return false;
     }
     if (before.running) {
@@ -12401,20 +12405,22 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
 }
 /**
  * Adds the lane's hostnames to the hosts file on Windows and macOS when they do not resolve,
- * before anything calls them. Returns whether the file was changed, so the post step undoes it.
- */ async function laneHosts(devlanes, inputs, lane, cwd) {
+ * before anything calls them, and records it so the post step removes them.
+ */ async function laneHosts(devlanes, inputs, state, cwd) {
     const platform = process.platform;
-    if (platform === 'linux' || inputs.hostsFile === 'false') return false;
-    const hosts = laneHostnames(await laneStatus(devlanes, lane, cwd));
-    if (hosts.length === 0) return false;
-    if (inputs.hostsFile === 'auto' && await resolvesToLoopback(hosts[0] ?? '')) return false;
+    if (platform === 'linux' || inputs.hostsFile === 'false') return;
+    const hosts = laneHostnames(await laneStatus(devlanes, state.lane, cwd));
+    if (hosts.length === 0) return;
+    if (inputs.hostsFile === 'auto' && await resolvesToLoopback(hosts[0] ?? '')) return;
+    // Recorded first: a write that fails halfway may still have changed the file, and removing a
+    // block that is not there does nothing.
+    state.hostsLane = state.lane;
+    state_saveState(state);
     try {
-        await addHosts(platform, hostsPath(platform, process.env), lane, hosts);
+        await addHosts(platform, hostsPath(platform, process.env), state.lane, hosts);
         core_info(`Added ${hosts.join(', ')} to the hosts file`);
-        return true;
     } catch (error) {
         core_warning(`Could not add the lane's hostnames to the hosts file, which needs an elevated runner on Windows and passwordless sudo on macOS: ${message(error)}`);
-        return false;
     }
 }
 /** `--timeout` and `--profile` flags from the inputs. */ function startFlags(inputs) {
@@ -12551,7 +12557,7 @@ const dist = __webpack_require__("./node_modules/.pnpm/yaml@2.9.1/node_modules/y
     // Written even without an upload, since `logs-dir` is what a workflow uploads itself.
     await writeDiagnostics(devlanes, logsDir, lane);
     if (shouldUpload(inputs.uploadLogs, failed)) {
-        const name = inputs.artifactName || defaultArtifactName(process.env, await job_jobName(process.env, inputs.token), laneEnv.lane);
+        const name = await logs_artifactName(inputs.artifactName, process.env, inputs.token, laneEnv.lane);
         await uploadLogs(logsDir, name, inputs.retentionDays);
     }
     const stopped = [
