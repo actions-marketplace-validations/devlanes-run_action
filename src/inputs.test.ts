@@ -1,15 +1,25 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { list, readInputs, version } from './inputs.ts';
+import { parse } from 'yaml';
+import { defaultVersion, list, readInputs, version } from './inputs.ts';
 
 /** An input reader over a fixed map, empty for anything missing, as the runner does. */
 function reader(values: Record<string, string>) {
   return (name: string) => values[name] ?? '';
 }
 
-test('defaults match action.yml when every input is empty', () => {
+test('an empty input means the same as the default in action.yml', async () => {
+  const metadata = parse(await readFile(new URL('../action.yml', import.meta.url), 'utf8')) as {
+    inputs: Record<string, { default?: string }>;
+  };
+  const defaults = readInputs((name) => metadata.inputs[name]?.default ?? '', 'linux');
+  assert.deepEqual(readInputs(reader({}), 'linux'), defaults);
+});
+
+test('defaults', () => {
   const inputs = readInputs(reader({}), 'linux');
-  assert.equal(inputs.version, 'latest');
+  assert.equal(inputs.version, defaultVersion);
   assert.equal(inputs.command, 'start');
   assert.equal(inputs.shell, 'bash');
   assert.equal(inputs.workingDirectory, '.');
@@ -72,7 +82,7 @@ test('retention-days takes whole days from 1 to 90', () => {
 });
 
 test('versions accept latest, next and exact releases with or without v', () => {
-  assert.equal(version(''), 'latest');
+  assert.equal(version(''), defaultVersion);
   assert.equal(version('Latest'), 'latest');
   assert.equal(version('next'), 'next');
   assert.equal(version('0.6.1'), '0.6.1');

@@ -1,0 +1,19 @@
+# A plain container routed through the proxy, and a service that reaches it by its port.
+project: fixture-infra
+infra:
+  containers:
+    whoami:
+      image: traefik/whoami:v1.12.0
+      ports:
+        http: 80
+  hosts:
+    whoami: "whoami.${{ lane.domain }}"
+services:
+  api:
+    run: [node, ../server.mjs]
+    hosts: "api.${{ lane.domain }}"
+    env:
+      WHOAMI_URL: "http://127.0.0.1:${{ infra.whoami.ports.http }}"
+    ready:
+      http:
+        path: /healthz

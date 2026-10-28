@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: devlanes version the end-to-end jobs install (latest, next or X.Y.Z)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Empty uses the default from action.yml. A dispatch can test another release, such as next.
+env:
+  DEVLANES_TEST_VERSION: ${{ inputs.version }}
+
+jobs:
+  checks:
+    name: Lint, types, unit tests and dist
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          cache: true
+          install: true
+          require-lockfile: true
+
+      - name: Lint
+        run: pnpm lint-ci
+
+      - name: Typecheck
+        run: pnpm test-types
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # The runner executes the committed dist/, so it must be exactly what the sources build.
+      - name: Check dist is up to date
+        run: |
+          if [ -n "$(git status --porcelain -- dist)" ]; then
+            git status --short -- dist
+            echo "::error::dist/ differs from a fresh build; run pnpm build and commit dist/"
+            exit 1
+          fi
+
+  e2e:
+    name: ${{ matrix.command }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        command: [start, with]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start the lane
+        if: matrix.command == 'start'
+        id: start
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/basic
+          # Every matrix job uploads under the same default name, which checks the -N suffixes.
+          upload-logs: always
+          retention-days: 1
+
+      - name: Check the outputs and the lane
+        if: matrix.command == 'start'
+        run: node test/e2e/check.mjs
+        env:
+          URLS: ${{ steps.start.outputs.urls }}
+          SERVICES: ${{ steps.start.outputs.services }}
+          HTTPS_PORT: ${{ steps.start.outputs.https-port }}
+          LANE: ${{ steps.start.outputs.lane }}
+
+      - name: Call the API with curl through the system store
+        if: matrix.command == 'start' && runner.os == 'Linux'
+        run: curl -fsS "$API/healthz"
+        env:
+          API: ${{ fromJSON(steps.start.outputs.urls).api }}
+
+      - name: Run the check against the lane
+        if: matrix.command == 'with'
+        id: with
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: with
+          working-directory: test/fixtures/basic
+          run: node ../../e2e/check.mjs
+          retention-days: 1
+
+      - name: Check the exit code output
+        if: matrix.command == 'with' && steps.with.outputs.exit-code != '0'
+        run: |
+          echo "::error::exit-code is '${{ steps.with.outputs.exit-code }}', expected 0"
+          exit 1
+
+  infra:
+    name: Containers and Chromium on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/setup@v3
+        with:
+          runtime: node@24
+          cache: true
+          install: true
+          require-lockfile: true
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
+      - name: Start the lane
+        id: devlanes
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/infra
+          retention-days: 1
+
+      - name: Check the container, its hostname and Chromium's trust
+        run: node test/e2e/infra.mjs
+        env:
+          INFRA: ${{ steps.devlanes.outputs.infra }}
+          URLS: ${{ steps.devlanes.outputs.urls }}
+          DOMAIN: ${{ steps.devlanes.outputs.domain }}
+
+      - name: Stop the lane and upload its logs
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          command: stop
+          working-directory: test/fixtures/infra
+          upload-logs: always
+          artifact-name: devlanes-logs-stop
+          retention-days: 1
+
+  failure:
+    name: Failed start on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Start a lane with a broken service
+        id: devlanes
+        continue-on-error: true
+        uses: ./
+        with:
+          version: ${{ env.DEVLANES_TEST_VERSION }}
+          working-directory: test/fixtures/failing
+          timeout: 60s
+          artifact-name: devlanes-logs-failure-${{ runner.os }}
+          retention-days: 1
+
+      - name: Check the step failed
+        if: steps.devlanes.outcome != 'failure'
+        run: |
+          echo "::error::the start succeeded although broken exits 3"
+          exit 1
+
+  artifacts:
+    name: Uploaded logs
+    needs: [infra, failure]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download the logs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: devlanes-logs-*
+          path: artifacts
+
+      - name: Check the stop step's logs
+        run: node test/e2e/logs.mjs artifacts/devlanes-logs-stop unit-api.log devlanes-doctor.txt devlanes-status.json infra-whoami.log
+
+      - name: Check the failed starts' logs
+        run: |
+          node test/e2e/logs.mjs artifacts/devlanes-logs-failure-Linux unit-broken.log unit-api.log
+          node test/e2e/logs.mjs artifacts/devlanes-logs-failure-Windows unit-broken.log unit-api.log

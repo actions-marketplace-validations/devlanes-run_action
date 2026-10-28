@@ -1,0 +1,8 @@
+# A service that exits before it is ready, so the start fails and the logs are uploaded.
+project: fixture-failing
+services:
+  api:
+    run: [node, ../server.mjs]
+    hosts: "api.${{ lane.domain }}"
+  broken:
+    run: [node, -e, "console.error('broken: missing configuration'); process.exit(3)"]

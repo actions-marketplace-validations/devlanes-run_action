@@ -1,0 +1,13 @@
+# An API behind a hostname and a worker without a port, like most projects.
+project: fixture
+services:
+  api:
+    run: [node, ../server.mjs]
+    hosts: "api.${{ lane.domain }}"
+    ready:
+      http:
+        path: /healthz
+  worker:
+    run: [node, ../worker.mjs]
+    ready:
+      log: worker ready

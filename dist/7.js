@@ -82832,9 +82832,14 @@ const cleanupModes = [
         cleanup: oneOf(read, 'cleanup', cleanupModes, 'stop')
     };
 }
+/**
+ * The devlanes version this release of the action was tested with. action.yml has the same
+ * default; an explicitly empty `version:` (such as an unset matrix value) gets it too.
+ */ const defaultVersion = '0.6.1';
 /** A `version` input normalized to `latest`, `next` or a bare `X.Y.Z[-pre]`. */ function inputs_version(value) {
     const trimmed = value.trim().toLowerCase();
-    if (!trimmed || trimmed === 'latest') return 'latest';
+    if (!trimmed) return defaultVersion;
+    if (trimmed === 'latest') return 'latest';
     if (trimmed === 'next') return 'next';
     const bare = trimmed.startsWith('v') ? trimmed.slice(1) : trimmed;
     if (!/^\d+\.\d+\.\d+(-[0-9a-z.-]+)?$/.test(bare)) {
