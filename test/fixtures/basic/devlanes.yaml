@@ -2,12 +2,13 @@
 project: fixture
 services:
   api:
-    run: [node, ../server.mjs]
+    # Services run from the repository root, not from this folder.
+    run: [node, test/fixtures/server.mjs]
     hosts: "api.${{ lane.domain }}"
     ready:
       http:
         path: /healthz
   worker:
-    run: [node, ../worker.mjs]
+    run: [node, test/fixtures/worker.mjs]
     ready:
       log: worker ready

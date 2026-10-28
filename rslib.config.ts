@@ -16,10 +16,6 @@ export default defineConfig({
   source: {
     entry: { main: './src/main.ts', post: './src/post.ts' }
   },
-  resolve: {
-    // debug, deep in @actions/artifact, tries this optional package for colors and works without it.
-    alias: { 'supports-color': false }
-  },
   output: {
     target: 'node',
     cleanDistPath: true,

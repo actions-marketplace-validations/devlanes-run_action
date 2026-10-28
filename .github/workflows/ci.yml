@@ -97,7 +97,8 @@ jobs:
         if: matrix.command == 'start' && runner.os == 'Linux'
         run: curl -fsS "$API/healthz"
         env:
-          API: ${{ fromJSON(steps.start.outputs.urls).api }}
+          # Step env is evaluated even when `if` skips the step, so the JSON must always parse.
+          API: ${{ fromJSON(steps.start.outputs.urls || '{}').api }}
 
       - name: Run the check against the lane
         if: matrix.command == 'with'
